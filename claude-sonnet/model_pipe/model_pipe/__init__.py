@@ -22,6 +22,7 @@ from model_pipe.pipes.key_rename import KeyRenamePipe
 from model_pipe.pipes._lora_base import LoRAMergeBase
 from model_pipe.pipes.lora_merge import LoRAMergePipe
 from model_pipe.pipes.fsdp_lora_merge import FSDPShardMergePipe
+from model_pipe.pipes.fp8_dequant import FP8DequantPipe
 
 __all__ = [
     # Pipeline
@@ -48,4 +49,5 @@ __all__ = [
     "LoRAMergeBase",
     "LoRAMergePipe",
     "FSDPShardMergePipe",
+    "FP8DequantPipe",
 ]

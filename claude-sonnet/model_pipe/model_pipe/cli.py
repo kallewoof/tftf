@@ -554,3 +554,124 @@ def validate(model: Path, pipe_spec: Optional[str], verbose: bool) -> None:
     click.echo("\n" + writer.report.summary())
     if not writer.report.ok:
         raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# dequant-fp8
+# ---------------------------------------------------------------------------
+
+
+@cli.command("dequant-fp8")
+@click.option("-i", "--input", "input_path", required=True, type=_MODEL_PATH_TYPE,
+              help="Fine-grained FP8 model (file, directory, or index.json).")
+@click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
+              help="Output path.")
+@click.option(
+    "--dtype",
+    type=click.Choice(["bfloat16", "float16", "float32"], case_sensitive=False),
+    default="bfloat16",
+    show_default=True,
+    help="Target dtype for dequantised weights.",
+)
+@click.option(
+    "--merge-lora", "lora_adapter", default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    metavar="ADAPTER",
+    help="Optional: fuse this LoRA adapter_model.safetensors after dequantisation.",
+)
+@click.option(
+    "--lora-config", default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="adapter_config.json for the LoRA adapter (auto-detected if omitted).",
+)
+@click.option("--lora-scale", default=1.0, show_default=True, type=float,
+              help="Extra scale on top of LoRA alpha/r.")
+@click.option("--lora-adapter-name", default="default", show_default=True,
+              help="PEFT adapter name inside the adapter file.")
+@click.option(
+    "--block-size", default=128, show_default=True, type=int,
+    help="FP8 block dimension (must match the model's weight_block_size).",
+)
+@click.option("--device", default="cpu", show_default=True,
+              help="Torch device for dequantisation and merge computation.")
+@_common_write_options
+@click.option("--no-progress", is_flag=True)
+@click.option("-v", "--verbose", is_flag=True)
+def dequant_fp8(
+    input_path: Path,
+    output_path: Path,
+    dtype: str,
+    lora_adapter: Optional[Path],
+    lora_config: Optional[Path],
+    lora_scale: float,
+    lora_adapter_name: str,
+    block_size: int,
+    device: str,
+    dry_run: bool,
+    sharded: bool,
+    max_shard_size: int,
+    no_progress: bool,
+    verbose: bool,
+) -> None:
+    """
+    Dequantise a fine-grained FP8 model to BF16 / FP16 / FP32.
+
+    Reads each FP8 weight and its companion weight_scale_inv tensor,
+    applies block-wise (128×128) dequantisation, and streams the result
+    to the output.  Scale tensors are consumed and dropped from output.
+    Non-FP8 tensors (norms, embeddings, etc.) pass through unchanged.
+
+    Optionally fuse a LoRA adapter after dequantisation via --merge-lora.
+
+    \b
+    Examples:
+        # Dequantise DeepSeek-V3 to bfloat16
+        model-pipe dequant-fp8 \\
+            -i ./DeepSeek-V3/ \\
+            -o ./DeepSeek-V3-bf16/ \\
+            --sharded
+
+        # Dequantise then fuse a LoRA adapter, dry-run first
+        model-pipe dequant-fp8 \\
+            -i ./DeepSeek-V3/ \\
+            -o ./merged/ \\
+            --dtype bfloat16 \\
+            --merge-lora ./my-lora/adapter_model.safetensors \\
+            --sharded --dry-run
+
+        # Dequantise to float16, write as a single file
+        model-pipe dequant-fp8 \\
+            -i ./model.safetensors \\
+            -o ./model-fp16.safetensors \\
+            --dtype float16
+    """
+    from model_pipe.pipes.fp8_dequant import FP8DequantPipe
+
+    _setup_logging(verbose)
+
+    target_dtype = _DTYPE_CHOICES[dtype]
+
+    pipe: Pipe = FP8DequantPipe(
+        target_dtype=target_dtype,
+        block_size=block_size,
+        device=device,
+    )
+
+    if lora_adapter is not None:
+        from model_pipe.pipes.lora_merge import LoRAMergePipe
+        pipe = pipe | LoRAMergePipe(
+            adapter_path=lora_adapter,
+            config_path=lora_config,
+            adapter_name=lora_adapter_name,
+            scale=lora_scale,
+            device=device,
+        )
+
+    writer = _make_writer(output_path, dry_run=dry_run, sharded=sharded,
+                          max_shard_size=max_shard_size)
+    Pipeline(
+        reader=_open_reader(input_path, device=device),
+        pipe=pipe,
+        writer=writer,
+    ).run(show_progress=not no_progress, progress_desc="dequant-fp8")
+    _finish_write(writer)
