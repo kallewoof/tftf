@@ -1,0 +1,8 @@
+safetensors>=0.4
+torch>=2.0
+click>=8.1
+tqdm>=4.60
+
+[dev]
+pytest>=7
+pytest-cov
