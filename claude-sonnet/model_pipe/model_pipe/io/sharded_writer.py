@@ -59,36 +59,36 @@ from typing import Optional
 import torch
 
 from model_pipe.pipes.base import TensorMeta, TensorRecord
-from model_pipe.io.writer import _TORCH_TO_ST, _DTYPE_ITEMSIZE, _nbytes
+from model_pipe.io.writer import _TORCH_TO_ST, _DTYPE_ITEMSIZE, _nbytes, StreamingWriter
 
 logger = logging.getLogger(__name__)
 
 
-class ShardedWriter:
+class ShardedWriter(StreamingWriter):
     """
     Two-phase streaming writer that distributes output across multiple shards.
 
     Args:
-        output_dir:       Directory to write shard files into (created if absent).
-        max_shard_bytes:  Soft upper bound per shard in bytes.
-                          A single tensor that exceeds this limit is placed
-                          alone in its own shard (no tensor is split).
-                          Default: 5 GiB.
-        filename_stem:    Prefix for shard filenames, e.g. ``"model"`` →
-                          ``model-00001-of-00003.safetensors``.
-        index_filename:   Name of the index file written into *output_dir*.
+        output_dir:         Directory to write shard files into (created if absent).
+        max_shard_bytes:    Soft upper bound per shard in bytes.
+                            A single tensor that exceeds this limit is placed
+                            alone in its own shard (no tensor is split).
+                            Default: 5 GiB.
+        filename_stem:      Prefix for shard filenames, e.g. ``"model"`` →
+                            ``model-00001-of-00003.safetensors``.
+        index_filename:     Name of the index file written into *output_dir*.
     """
 
-    DEFAULT_MAX_SHARD_BYTES = 5 * 1024**3  # 5 GiB
+    DEFAULT_MAX_SHARD_BYTES = 20 * 1024**3  # 20 GiB
 
     def __init__(
         self,
-        output_dir: Path | str,
+        path: Path | str,
         max_shard_bytes: int = DEFAULT_MAX_SHARD_BYTES,
         filename_stem: str = "model",
         index_filename: str = "model.safetensors.index.json",
     ) -> None:
-        self.output_dir = Path(output_dir)
+        super().__init__(path)
         self.max_shard_bytes = max_shard_bytes
         self.filename_stem = filename_stem
         self.index_filename = index_filename
@@ -101,7 +101,6 @@ class ShardedWriter:
         # Phase 2 state
         self._current_shard_idx: int = 0
         self._current_tensor_idx: int = 0  # index within the current shard
-        self._fh = None
 
     # ------------------------------------------------------------------
     # Phase 1 — assign tensors to shards and write headers
@@ -120,7 +119,7 @@ class ShardedWriter:
             file_metadata: Optional key→value pairs for each shard's
                            ``__metadata__`` section (same dict for all shards).
         """
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.path.mkdir(parents=True, exist_ok=True)
 
         # ----------------------------------------------------------------
         # Assign metas to shards (greedy bin-packing by byte size)
@@ -163,7 +162,7 @@ class ShardedWriter:
                 f"{self.filename_stem}-"
                 f"{i+1:0{width}d}-of-{n_shards:0{width}d}.safetensors"
             )
-            shard_paths.append(self.output_dir / name)
+            shard_paths.append(self.path / name)
         self._shard_paths = shard_paths
 
         # ----------------------------------------------------------------
@@ -192,7 +191,7 @@ class ShardedWriter:
             "metadata": {"total_size": total_size},
             "weight_map": self._weight_map,
         }
-        index_path = self.output_dir / self.index_filename
+        index_path = self.path / self.index_filename
         index_path.write_text(json.dumps(index, indent=2))
         logger.info("Wrote %s", index_path)
 
@@ -245,7 +244,7 @@ class ShardedWriter:
             self._fh = None
         n = len(self._shard_paths)
         logger.info(
-            "ShardedWriter: wrote %d shard(s) to %s", n, self.output_dir
+            "ShardedWriter: wrote %d shard(s) to %s", n, self.path
         )
 
     # ------------------------------------------------------------------

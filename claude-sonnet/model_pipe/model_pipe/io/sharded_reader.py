@@ -64,7 +64,7 @@ def _find_index(directory: Path) -> Path | None:
     return None
 
 
-class ShardedSafetensorsReader:
+class ShardedSafetensorsReader(SafetensorsReader):
     """
     Unified reader over a sharded HuggingFace safetensors model.
 

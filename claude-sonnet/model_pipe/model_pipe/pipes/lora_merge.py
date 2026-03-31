@@ -60,7 +60,11 @@ class LoRAMergePipe(LoRAMergeBase):
         device: str = "cpu",
     ) -> None:
         super().__init__(adapter_name=adapter_name, scale=scale, device=device)
-        self.adapter_path = Path(adapter_path)
+        self.adapter_path = (
+            Path(adapter_path)
+            if str(adapter_path).endswith("adapter_model.safetensors")
+            else adapter_path / Path("adapter_model.safetensors")
+        )
 
         if config_path is not None:
             self._config_path: Optional[Path] = Path(config_path)

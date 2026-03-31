@@ -15,7 +15,7 @@ model.safetensors.index.json files as model inputs.
 All write commands support:
   --dry-run            Validate without writing anything to disk.
   --sharded            Write output as shard files + index.json.
-  --max-shard-size N   Maximum bytes per output shard (default 5 GiB).
+  --max-shard-size N   Maximum bytes per output shard (default 20 GiB).
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def _common_write_options(f):
     )(f)
     f = click.option(
         "--max-shard-size", default=_DEFAULT_MAX_SHARD_BYTES,
-        show_default="5 GiB", type=int,
+        show_default="20 GiB", type=int,
         help="Maximum bytes per output shard (only used with --sharded).",
     )(f)
     return f
@@ -301,8 +301,8 @@ def passthrough(
 @click.option("-b", "--base", "base_path", required=True, type=_MODEL_PATH_TYPE,
               help="Base model (file, directory, or index.json).")
 @click.option("-a", "--adapter", "adapter_path", required=True,
-              type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="LoRA adapter_model.safetensors.")
+              type=click.Path(exists=True, dir_okay=True, path_type=Path),
+              help="LoRA adapter_model.safetensors or dir containing it.")
 @click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
               help="Output path.")
 @click.option("--adapter-config", type=click.Path(dir_okay=False, path_type=Path), default=None,
