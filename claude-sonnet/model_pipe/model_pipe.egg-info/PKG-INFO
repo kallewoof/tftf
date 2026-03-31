@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: model-pipe
-Version: 0.1.0
+Version: 0.3.0
 Summary: Streaming operations on HuggingFace .safetensors models
 License: MIT
 Keywords: huggingface,safetensors,lora,transformers,streaming
@@ -18,101 +18,184 @@ Requires-Dist: pytest-cov; extra == "dev"
 
 Streaming operations on HuggingFace `.safetensors` models.
 
-Tensors are processed **one at a time**.  The full model is never loaded into RAM or VRAM simultaneously — each tensor is loaded, transformed, written, and freed before the next one is touched.
+Tensors are processed **one at a time**. The full model is never loaded into RAM or VRAM — each tensor is loaded, transformed, written, and freed before the next one is touched.
 
 ---
 
 ## Features
 
-- **Truly streaming** — uses safetensors memory-mapping; only the current tensor is in RAM
-- **Modular pipes** — composable `Pipe` interface with `|` operator
-- **LoRA merge** — fuse PEFT adapters into a base model on-the-fly
-- **Dtype casting** — cast weights to fp16/bf16 during any operation
-- **CLI** — `model-pipe info / passthrough / merge-lora`
-- **Extensible** — add new pipes by subclassing `Pipe`
+| Feature | Description |
+|---|---|
+| **Truly streaming** | safetensors mmap; only the current tensor is ever in RAM |
+| **FP8 dequantisation** | DeepSeek-V3/R1 style fine-grained FP8 → BF16/FP16, vectorised |
+| **LoRA merge** | Fuse PEFT adapters into a base model on-the-fly |
+| **FSDP LoRA merge** | Reconstruct per-rank FSDP shards and merge |
+| **Sharded I/O** | Read/write multi-shard models with `model.safetensors.index.json` |
+| **Dtype casting** | Cast weights to fp16/bf16 at any pipeline stage |
+| **Key filter** | Include/exclude tensors by glob pattern |
+| **Key rename** | Regex-based key renaming for cross-framework checkpoint conversion |
+| **Dry-run / validate** | Full pipeline validation without writing output |
+| **Composable pipes** | `pipe_a \| pipe_b \| pipe_c` chains with `\|` operator |
 
 ---
 
 ## Install
 
 ```bash
-pip install -e .          # from source
-# or
-pip install model-pipe
+pip install -e .
 ```
 
-Requires Python ≥ 3.11, PyTorch ≥ 2.0.
+Requires Python ≥ 3.11, PyTorch ≥ 2.0. FP8 dequantisation requires PyTorch ≥ 2.1 (for `torch.float8_e4m3fn`).
 
 ---
 
-## CLI usage
+## CLI reference
 
-### Inspect a model
+All commands accept single `.safetensors` files, directories containing `model.safetensors.index.json`, or index files directly.
 
-```bash
-model-pipe info ./llama-7b/model.safetensors
-model-pipe info ./model.safetensors --filter q_proj   # filter by key substring
-```
+All write commands accept `--dry-run` (validate without writing), `--sharded` (write as shard files + index.json), and `--max-shard-size` (bytes per shard, default 5 GiB).
 
-### Copy without loading the full model
+### `info` — inspect a model
 
 ```bash
-model-pipe passthrough \
-    -i ./model.safetensors \
-    -o ./copy.safetensors
-
-# Copy and cast to bfloat16:
-model-pipe passthrough \
-    -i ./model-fp32.safetensors \
-    -o ./model-bf16.safetensors \
-    --dtype bfloat16
+model-pipe info ./llama-7b/
+model-pipe info ./model.safetensors --filter q_proj
+model-pipe info ./DeepSeek-V3/ --dtype-summary
 ```
 
-### Merge a LoRA adapter
+### `passthrough` — copy without loading the full model
+
+```bash
+# Copy and cast to bfloat16
+model-pipe passthrough -i ./model.safetensors -o ./model-bf16.safetensors --dtype bfloat16
+
+# Copy a sharded model, writing output as new shards
+model-pipe passthrough -i ./llama-70b/ -o ./llama-70b-copy/ --sharded
+
+# Copy only attention weights
+model-pipe passthrough -i ./model.safetensors -o ./attn.safetensors \
+    --include '*self_attn*'
+
+# Validate without writing
+model-pipe passthrough -i ./model.safetensors -o /dev/null --dry-run
+```
+
+### `dequant-fp8` — dequantise fine-grained FP8 to BF16/FP16
+
+```bash
+# Dequantise DeepSeek-V3 to bfloat16, writing sharded output
+model-pipe dequant-fp8 \
+    -i ./DeepSeek-V3/ \
+    -o ./DeepSeek-V3-bf16/ \
+    --sharded
+
+# Dequantise then fuse a LoRA adapter in one pass
+model-pipe dequant-fp8 \
+    -i ./DeepSeek-V3/ \
+    -o ./merged/ \
+    --dtype bfloat16 \
+    --merge-lora ./my-lora/adapter_model.safetensors \
+    --sharded
+
+# Dry-run to validate the pipeline before committing disk space
+model-pipe dequant-fp8 \
+    -i ./DeepSeek-V3/ \
+    -o /dev/null \
+    --dtype bfloat16 \
+    --dry-run
+```
+
+### `merge-lora` — fuse a LoRA adapter into a base model
 
 ```bash
 model-pipe merge-lora \
-    -b ./llama-7b/model.safetensors \
+    -b ./llama-7b/ \
     -a ./my-lora/adapter_model.safetensors \
+    -o ./merged.safetensors \
+    --dtype bfloat16
+
+# Write as shards with key renaming
+model-pipe merge-lora \
+    -b ./llama-7b/ \
+    -a ./adapter_model.safetensors \
+    -o ./merged/ --sharded \
+    --rename '^transformer\.h\.' 'model.layers.'
+```
+
+### `merge-fsdp-lora` — fuse a per-rank FSDP-sharded LoRA
+
+```bash
+# Explicit per-rank files
+model-pipe merge-fsdp-lora \
+    -b ./llama-7b/ \
+    -s ./run/rank_00.safetensors \
+    -s ./run/rank_01.safetensors \
     -o ./merged.safetensors
 
-# Merge and save as bfloat16:
-model-pipe merge-lora \
-    -b ./llama-7b/model.safetensors \
-    -a ./my-lora/adapter_model.safetensors \
-    -o ./merged-bf16.safetensors \
-    --dtype bfloat16
+# Directory of shard files (sorted alphabetically = rank order)
+model-pipe merge-fsdp-lora \
+    -b ./llama-7b/ --shard-dir ./run/ \
+    -o ./merged/ --sharded --dtype bfloat16
+```
 
-# Use GPU for the merge computation:
-model-pipe merge-lora \
-    -b ./model.safetensors \
-    -a ./adapter_model.safetensors \
-    -o ./merged.safetensors \
-    --device cuda
+### `validate` — validate without writing
 
-# Explicit adapter config path and extra scale:
-model-pipe merge-lora \
-    -b ./model.safetensors \
-    -a ./adapter_model.safetensors \
-    -o ./merged.safetensors \
-    --adapter-config ./my-lora/adapter_config.json \
-    --scale 0.8
+```bash
+model-pipe validate ./model.safetensors
+model-pipe validate ./llama-70b/
+model-pipe validate ./model.safetensors --pipe dtype:bfloat16
+model-pipe validate ./model.safetensors --pipe filter:*q_proj*
 ```
 
 ---
 
 ## Python API
 
-Pipes are composable with `|`:
+### FP8 dequantisation + LoRA merge in one pass
 
 ```python
-from model_pipe import Pipeline, SafetensorsReader, StreamingWriter
-from model_pipe.pipes.lora_merge import LoRAMergePipe
-from model_pipe.pipes.dtype_cast import DTypeCastPipe
+from model_pipe import (
+    Pipeline,
+    ShardedSafetensorsReader,
+    ShardedWriter,
+    FP8DequantPipe,
+    LoRAMergePipe,
+)
 import torch
 
-# Merge LoRA then cast to bfloat16 — only one tensor in RAM at a time
-pipe = LoRAMergePipe("adapter_model.safetensors") | DTypeCastPipe(torch.bfloat16)
+pipe = FP8DequantPipe(torch.bfloat16) | LoRAMergePipe("./my-lora/adapter_model.safetensors")
+
+Pipeline(
+    reader=ShardedSafetensorsReader.from_path("./DeepSeek-V3/"),
+    pipe=pipe,
+    writer=ShardedWriter("./DeepSeek-V3-bf16-merged/"),
+).run()
+```
+
+### Dry-run validation
+
+```python
+from model_pipe import Pipeline, SafetensorsReader, NullWriter, FP8DequantPipe
+import torch
+
+writer = NullWriter()
+Pipeline(
+    reader=SafetensorsReader("./model.safetensors"),
+    pipe=FP8DequantPipe(torch.bfloat16),
+    writer=writer,
+).run()
+
+print(writer.report.summary())
+assert writer.report.ok
+```
+
+### LoRA merge with dtype cast
+
+```python
+from model_pipe import Pipeline, SafetensorsReader, StreamingWriter, LoRAMergePipe, DTypeCastPipe
+import torch
+
+pipe = LoRAMergePipe("adapter_model.safetensors") | DTypeCastPipe(torch.float16)
 
 Pipeline(
     reader=SafetensorsReader("model.safetensors"),
@@ -126,46 +209,56 @@ Pipeline(
 ## Architecture
 
 ```
-model-pipe
-├── model_pipe/
-│   ├── cli.py            Click CLI entry point
-│   ├── pipeline.py       Two-pass orchestrator
-│   ├── pipes/
-│   │   ├── base.py       TensorRecord, TensorMeta, Pipe, CompoundPipe
-│   │   ├── passthrough.py
-│   │   ├── lora_merge.py
-│   │   └── dtype_cast.py
-│   ├── io/
-│   │   ├── reader.py     Lazy mmap-backed safetensors reader
-│   │   └── writer.py     Two-phase streaming safetensors writer
-│   └── utils/
-│       └── lora.py       Key mapping, merge math
-└── tests/
-    └── test_pipeline.py
+model_pipe/
+├── cli.py                  Click CLI (info, passthrough, dequant-fp8,
+│                           merge-lora, merge-fsdp-lora, validate)
+├── pipeline.py             Two-pass orchestrator
+├── pipes/
+│   ├── base.py             Pipe (ABC), CompoundPipe, TensorRecord, TensorMeta
+│   ├── passthrough.py      Identity pipe
+│   ├── dtype_cast.py       DTypeCastPipe
+│   ├── key_filter.py       KeyFilterPipe (glob include/exclude)
+│   ├── key_rename.py       KeyRenamePipe (regex substitution)
+│   ├── _lora_base.py       LoRAMergeBase (shared merge logic)
+│   ├── lora_merge.py       LoRAMergePipe (single adapter file)
+│   ├── fsdp_lora_merge.py  FSDPShardMergePipe (per-rank shards)
+│   └── fp8_dequant.py      FP8DequantPipe (fine-grained FP8 → BF16/FP16)
+├── io/
+│   ├── reader.py           SafetensorsReader (single file, mmap)
+│   ├── sharded_reader.py   ShardedSafetensorsReader (index.json)
+│   ├── writer.py           StreamingWriter (single file output)
+│   ├── sharded_writer.py   ShardedWriter (multi-shard output)
+│   └── null_writer.py      NullWriter + ValidationReport (dry-run)
+└── utils/
+    ├── lora.py             LoRA key mapping, merge math
+    ├── fsdp.py             FSDP shard discovery and reconstruction
+    └── fp8.py              FP8 dtype helpers, vectorised dequantisation
 ```
 
 ### Two-pass pipeline
 
-The safetensors format requires the complete header (tensor names, shapes, dtypes, byte offsets) at the **beginning** of the file, before any data.  This is handled in two passes:
+The safetensors format requires the complete header (all tensor names, shapes, dtypes, and byte offsets) at the **start** of the file, before any data. This creates a chicken-and-egg problem for streaming output, solved with two passes:
 
 ```
-Phase 1 — metadata scan
-  reader.iter_meta()           (reads JSON header only, no tensor data)
-      ↓
-  pipe.process_meta()          (may change keys/shapes/dtypes)
-      ↓
-  writer.prepare(metas)        (writes safetensors header to disk)
+Phase 1 — metadata scan  (no tensor data loaded)
+──────────────────────────────────────────────────
+reader.iter_meta()         reads JSON header only (mmap header section)
+    ↓
+pipe.process_meta()        transforms key/shape/dtype declarations
+    ↓
+writer.prepare(metas)      writes safetensors header to disk
 
-Phase 2 — data stream
-  reader.iter_records()        (mmap: one tensor paged in at a time)
-      ↓
-  pipe.process()               (transform: merge, cast, …)
-      ↓
-  writer.write_record()        (append raw bytes)
-      ↓  del record            (free tensor, GC reclaims memory)
-  (repeat for each tensor)
-      ↓
-  writer.finalize()
+Phase 2 — data stream  (one tensor in RAM at a time)
+──────────────────────────────────────────────────────
+reader.iter_records()      mmap: pages in one tensor at a time
+    ↓
+pipe.process()             transform: dequant / merge / cast / filter
+    ↓
+writer.write_record()      appends raw tensor bytes
+    ↓  del record          GC reclaims before loading next tensor
+    (repeat)
+    ↓
+writer.finalize()
 ```
 
 ### Pipe interface
@@ -177,70 +270,76 @@ class Pipe(ABC):
     def setup(self) -> None: ...     # called once before process()
     def teardown(self) -> None: ...  # called once after process()
     def __or__(self, other) -> CompoundPipe: ...
+    def __repr__(self) -> str: ...
 ```
 
-- **`process()`** — lazy generator: consume one record, yield one-or-more, free immediately.
-- **`process_meta()`** — identity by default; override only if the pipe changes keys/shapes/dtypes.
-- **`setup()` / `teardown()`** — one-time init/cleanup (e.g. loading adapter weights).
+Rules for implementing `process()`:
+- **Be lazy** — consume one record, yield zero-or-more, free immediately
+- **Don't buffer** the whole stream
+- It is valid to **drop** records (filter) or **add** records (inject)
+- Free tensors as soon as possible: `del record.tensor` after yielding
+
+Override `process_meta()` only when your pipe changes keys, shapes, or dtypes. The default is the identity.
 
 ### Writing a new pipe
 
 ```python
 from model_pipe.pipes.base import Pipe, TensorRecord, TensorMeta
 from typing import Iterator
+import torch
 
-class QuantisePipe(Pipe):
-    """Example: quantise every weight to int8."""
+class MyQuantisePipe(Pipe):
+    """Example: quantise every float32 weight to int8."""
 
     def process_meta(self, metas: Iterator[TensorMeta]) -> Iterator[TensorMeta]:
-        import torch
         for meta in metas:
-            yield TensorMeta(key=meta.key, dtype=torch.int8, shape=meta.shape)
+            new_dtype = torch.int8 if meta.dtype == torch.float32 else meta.dtype
+            yield TensorMeta(key=meta.key, dtype=new_dtype, shape=meta.shape)
 
     def process(self, records: Iterator[TensorRecord]) -> Iterator[TensorRecord]:
         for record in records:
-            q = record.tensor.to(torch.int8)
-            yield TensorRecord(key=record.key, tensor=q)
-            del q
+            t = record.tensor.to(torch.int8) if record.tensor.dtype == torch.float32 \
+                else record.tensor
+            yield TensorRecord(key=record.key, tensor=t)
+            del t
+
+    def __repr__(self) -> str:
+        return "MyQuantisePipe()"
 ```
 
-Then expose it in `cli.py` as a new command or option.
+---
+
+## FP8 format details
+
+Models like DeepSeek-V3 store quantised weights as:
+
+| Tensor | Dtype | Shape |
+|---|---|---|
+| `model.layers.N.*.weight` | `float8_e4m3fn` | `(out_features, in_features)` |
+| `model.layers.N.*.weight_scale_inv` | `float32` | `(⌈out/128⌉, ⌈in/128⌉)` |
+
+Dequantisation reconstructs the full-precision weight block by block:
+
+```
+W_out[r:r+128, c:c+128] = W_fp8[r:r+128, c:c+128].float() * scale_inv[r//128, c//128]
+```
+
+`FP8DequantPipe` uses a vectorised broadcast-multiply (pad → reshape → permute → multiply → unpad) rather than a Python loop, making it orders of magnitude faster for large matrices. Scale tensors are automatically detected and dropped from output.
 
 ---
 
 ## LoRA key mapping
 
-`LoRAMergePipe` automatically detects PEFT naming conventions:
+`LoRAMergePipe` and `FSDPShardMergePipe` auto-detect PEFT naming conventions:
 
-| Pattern | Example |
+| Pattern | Description |
 |---|---|
 | `base_model.model.<key>.lora_{A,B}.weight` | Standard PEFT |
 | `base_model.model.<key>.lora_{A,B}.<name>.weight` | Named adapter |
-| `<key>.lora_{A,B}.weight` | No prefix |
+| `<key>.lora_{A,B}.weight` | No prefix variant |
 | `base_model.model.<key>.lora_embedding_{A,B}` | Embedding layers |
 
-If `adapter_config.json` is in the same directory as the adapter file it is read automatically for `r` and `lora_alpha`.
-
----
-
-## Roadmap / extending for FSDP shards
-
-The next planned pipe is **`FSDPShardMergePipe`** for adapters produced by FSDP training runs, where each rank saves its own `.safetensors` shard.
-
-The design will be:
-
-```
-ShardedLoRAReader(shard_paths: list[Path])
-    .iter_meta()     — union of all shard headers
-    .iter_records()  — concatenate shard tensors in the right order
-
-FSDPShardMergePipe(shard_paths, ...)
-    setup()          — load all shard lora_A / lora_B, all-gather into
-                       full parameter tensors (still small)
-    process()        — identical to LoRAMergePipe.process()
-```
-
-The `Pipe.process()` / `Pipe.process_meta()` interface is **unchanged**.
+`adapter_config.json` is auto-detected from the adapter directory for `r` and `lora_alpha`.
 
 ---
 
@@ -250,3 +349,15 @@ The `Pipe.process()` / `Pipe.process_meta()` interface is **unchanged**.
 pip install -e ".[dev]"
 pytest -v
 ```
+
+91 tests across 4 test files. All tests run without downloading any real model — synthetic tensors are generated in-process.
+
+---
+
+## Requirements
+
+- Python ≥ 3.11
+- PyTorch ≥ 2.0 (≥ 2.1 for FP8 support)
+- safetensors ≥ 0.4
+- click ≥ 8.1
+- tqdm ≥ 4.60
