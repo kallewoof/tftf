@@ -3,113 +3,147 @@ fp8.py — utilities for fine-grained FP8 dequantisation.
 
 Format
 ------
-DeepSeek-V3 (and similar models) store linear-layer weights in the
-``torch.float8_e4m3fn`` dtype alongside a companion ``weight_scale_inv``
-tensor that encodes per-block dequantisation scales.
+DeepSeek-V3 / DeepSeek-R1 store linear weights as ``torch.float8_e4m3fn``
+alongside a companion ``weight_scale_inv`` tensor that holds per-block
+dequantisation scales:
 
-Naming convention (HuggingFace / DeepSeek layout)
----------------------------------------------------
-  some.layer.weight           float8_e4m3fn  (out_features, in_features)
-  some.layer.weight_scale_inv float32        (⌈out/128⌉, ⌈in/128⌉)
-
-Block layout
-------------
-The weight matrix is divided into non-overlapping 128×128 blocks.
-Each block has one float32 scale stored in ``weight_scale_inv``.
+    model.layers.N.self_attn.q_proj.weight            float8_e4m3fn  (out, in)
+    model.layers.N.self_attn.q_proj.weight_scale_inv  float32        (⌈out/128⌉, ⌈in/128⌉)
 
 Dequantisation formula
 -----------------------
-  W_dequant[r:r+128, c:c+128] = W_fp8[r:r+128, c:c+128].float()
-                                 * weight_scale_inv[r//128, c//128]
+  W_dequant[r:r+B, c:c+B] = W_fp8[r:r+B, c:c+B].float()
+                             * weight_scale_inv[r//B, c//B]
 
-where ``r`` and ``c`` are the block row/col start indices.
+where B = block_size (128 by default).
 
-When ``out_features`` or ``in_features`` is not a multiple of 128 the last
-block is a partial block; the formula still applies — the scale covers
-whatever portion of the 128-row/column window is actually present.
+Vectorised implementation
+--------------------------
+The naive Python loop over all (n_row_blocks × n_col_blocks) blocks is
+O(n²) in the number of blocks and extremely slow for large matrices.  For
+a 7168×7168 weight that is 56×56 = 3136 Python iterations per tensor.
 
-Padding note
-------------
-DeepSeek's quantiser zero-pads weights to the nearest 128 boundary before
-computing scales, then stores the *unpadded* weight.  When dequantising we
-must therefore handle non-multiple-of-128 dimensions correctly by operating
-on the actual (possibly smaller) slice rather than a padded view.
+The vectorised path pads the weight to the nearest block boundary, reshapes
+to (n_rb, B, n_cb, B), transposes to (n_rb, n_cb, B, B), multiplies by the
+(n_rb, n_cb, 1, 1) scale broadcast, then slices back to the original shape.
+This is a single BLAS-level element-wise multiply — orders of magnitude
+faster.
 
-Companion key detection
------------------------
-``scale_inv_key_for(weight_key)`` → ``weight_key + "_scale_inv"``
-``weight_key_for_scale(scale_key)`` → strip ``"_scale_inv"`` suffix
-``is_scale_inv_key(key)``          → key ends with ``"_scale_inv"``
+Scale naming
+-------------
+``weight_scale_inv``  →  multiply  (standard DeepSeek convention)
+``weight_scale``      →  divide    (some other checkpoints)
 
-Alternative naming
-------------------
-Some checkpoints use ``weight_scale`` instead of ``weight_scale_inv``.
-We detect both.  When the tensor is named ``weight_scale`` (not ``_inv``)
-the scale is applied as division rather than multiplication:
+The ``invert_scale`` argument to ``dequantize_fp8_weight`` selects which.
 
-  W_dequant = W_fp8.float() / weight_scale[block_row, block_col]
-
-The ``dequantize_fp8_weight`` function accepts an ``invert_scale`` flag
-that callers should set based on which key name they observed.
+Key helpers
+-----------
+``scale_inv_key_for(w)``      → ``w + "_scale_inv"``
+``scale_key_for(w)``          → ``w + "_scale"``
+``weight_key_for_scale(s)``   → strip suffix
+``is_scale_key(k)``           → k ends with ``".weight_scale_inv"`` or
+                                 ``".weight_scale"`` (anchored to avoid
+                                 false positives like ``rope_scale``)
+``is_fp8_dtype(d)``           → True for any float8 variant
 """
 
 from __future__ import annotations
 
 import torch
 
-# -------------------------------------------------------------------------
-# Key naming helpers
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# FP8 dtype set — built defensively to handle PyTorch < 2.1
+# ---------------------------------------------------------------------------
 
-_SCALE_INV_SUFFIX = "_scale_inv"
-_SCALE_SUFFIX     = "_scale"
-_FP8_DTYPES       = {torch.float8_e4m3fn, torch.float8_e4m3fnuz,
-                     torch.float8_e5m2,   torch.float8_e5m2fnuz}
+_FP8_DTYPES: set[torch.dtype] = set()
+for _name in ("float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz"):
+    _attr = getattr(torch, _name, None)
+    if _attr is not None:
+        _FP8_DTYPES.add(_attr)
 
-# Fallback for older PyTorch that may not have all fp8 variants
-try:
-    _FP8_DTYPES.add(torch.float8_e4m3fn)
-except AttributeError:
-    pass
+HAS_FP8 = len(_FP8_DTYPES) > 0
 
 
 def is_fp8_dtype(dtype: torch.dtype) -> bool:
-    """Return True if *dtype* is any supported FP8 variant."""
+    """Return True if *dtype* is any recognised FP8 variant."""
     return dtype in _FP8_DTYPES
 
 
+# ---------------------------------------------------------------------------
+# Key naming helpers
+# ---------------------------------------------------------------------------
+
+_SCALE_INV_SUFFIX = ".weight_scale_inv"
+_SCALE_SUFFIX     = ".weight_scale"
+
+# The raw suffixes without the leading dot, for stripping
+_SCALE_INV_BARE = "weight_scale_inv"
+_SCALE_BARE     = "weight_scale"
+
+
 def is_scale_key(key: str) -> bool:
-    """Return True if *key* is a weight_scale_inv or weight_scale companion key."""
-    return key.endswith(_SCALE_INV_SUFFIX) or key.endswith(_SCALE_SUFFIX)
+    """
+    Return True if *key* is a weight_scale_inv or weight_scale companion.
+
+    Anchored to ``.weight_scale_inv`` / ``.weight_scale`` to avoid false
+    positives from unrelated keys like ``rope_scale`` or ``input_layernorm``.
+    A bare ``weight_scale_inv`` (no dot prefix) is also accepted for
+    top-level keys.
+    """
+    return (
+        key.endswith(_SCALE_INV_SUFFIX)
+        or key.endswith(_SCALE_SUFFIX)
+        or key == _SCALE_INV_BARE
+        or key == _SCALE_BARE
+    )
 
 
 def weight_key_for_scale(scale_key: str) -> str:
     """
     Derive the base weight key from a scale key.
 
-    ``some.layer.weight_scale_inv`` → ``some.layer.weight``
-    ``some.layer.weight_scale``     → ``some.layer.weight``
+    ``model.layer.weight_scale_inv`` → ``model.layer.weight``
+    ``model.layer.weight_scale``     → ``model.layer.weight``
     """
     if scale_key.endswith(_SCALE_INV_SUFFIX):
-        return scale_key[: -len(_SCALE_INV_SUFFIX)]
+        # e.g. "model.layers.0.q_proj.weight_scale_inv"
+        #   → "model.layers.0.q_proj.weight"
+        base = scale_key[: -len(_SCALE_INV_BARE)]  # strips "weight_scale_inv"
+        return base + "weight"
     if scale_key.endswith(_SCALE_SUFFIX):
-        return scale_key[: -len(_SCALE_SUFFIX)]
-    raise ValueError(f"Not a scale key: {scale_key!r}")
+        base = scale_key[: -len(_SCALE_BARE)]
+        return base + "weight"
+    # Bare top-level scale key
+    if scale_key == _SCALE_INV_BARE:
+        return "weight"
+    if scale_key == _SCALE_BARE:
+        return "weight"
+    raise ValueError(f"Not a recognised scale key: {scale_key!r}")
 
 
 def scale_inv_key_for(weight_key: str) -> str:
-    """Return the expected ``weight_scale_inv`` companion key for *weight_key*."""
+    """
+    Return the expected ``weight_scale_inv`` companion key.
+
+    ``model.layer.weight`` → ``model.layer.weight_scale_inv``
+    """
+    # Replace trailing ".weight" with ".weight_scale_inv"
+    if weight_key.endswith(".weight"):
+        return weight_key + "_scale_inv"
+    # No ".weight" suffix — just append
     return weight_key + _SCALE_INV_SUFFIX
 
 
 def scale_key_for(weight_key: str) -> str:
-    """Return the expected ``weight_scale`` companion key for *weight_key*."""
+    """Return the expected ``weight_scale`` companion key."""
+    if weight_key.endswith(".weight"):
+        return weight_key + "_scale"
     return weight_key + _SCALE_SUFFIX
 
 
-# -------------------------------------------------------------------------
-# Dequantisation
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Dequantisation — vectorised
+# ---------------------------------------------------------------------------
 
 _BLOCK = 128
 
@@ -124,75 +158,88 @@ def dequantize_fp8_weight(
     """
     Dequantise a fine-grained FP8 weight tensor to *target_dtype*.
 
+    Uses a vectorised broadcast-multiply rather than a Python block loop,
+    making it orders of magnitude faster for large matrices.
+
     Args:
         weight:       FP8 weight tensor, shape ``(out_features, in_features)``.
-        scale:        Per-block scale, shape ``(⌈out/block⌉, ⌈in/block⌉)``.
-                      dtype must be float32 (or will be cast to float32).
-        target_dtype: Output dtype — typically ``torch.bfloat16`` or
-                      ``torch.float16``.  The computation always uses
-                      float32 internally regardless of this value.
-        invert_scale: If ``True`` the scale is applied as *division*
-                      (i.e. it is a ``weight_scale`` not ``weight_scale_inv``).
-                      Default ``False`` → multiply (standard ``weight_scale_inv``).
-        block_size:   Block dimension.  Default 128 (DeepSeek convention).
+        scale:        Per-block scale tensor, shape ``(⌈out/B⌉, ⌈in/B⌉)``,
+                      dtype float32.
+        target_dtype: Output dtype — ``torch.bfloat16``, ``torch.float16``,
+                      or ``torch.float32``.
+        invert_scale: ``False`` (default) → multiply by scale
+                      (``weight_scale_inv`` convention).
+                      ``True`` → divide by scale (``weight_scale`` convention).
+        block_size:   Block dimension B.  Default 128.
 
     Returns:
-        Dequantised weight as a contiguous tensor in *target_dtype*.
+        Dequantised weight, contiguous, in *target_dtype*.
 
     Raises:
-        ValueError: If weight is not a 2-D FP8 tensor, or scale shape is
-                    inconsistent with weight shape.
+        ValueError: If weight is not 2-D, not an FP8 dtype, or the scale
+                    shape is inconsistent with the weight shape.
     """
     if weight.ndim != 2:
         raise ValueError(
             f"FP8 dequantisation expects a 2-D weight tensor; "
-            f"got shape {tuple(weight.shape)}"
+            f"got ndim={weight.ndim}, shape={tuple(weight.shape)}"
         )
     if not is_fp8_dtype(weight.dtype):
         raise ValueError(
             f"Expected an FP8 dtype; got {weight.dtype}.  "
-            f"Supported: {_FP8_DTYPES}"
+            f"Supported FP8 dtypes: {_FP8_DTYPES or '(none — upgrade PyTorch to ≥2.1)'}"
         )
 
     out_f, in_f = weight.shape
+    B = block_size
+
+    n_rb = (out_f + B - 1) // B  # number of row blocks
+    n_cb = (in_f  + B - 1) // B  # number of col blocks
+
+    # ---- Validate / normalise scale shape ----------------------------------
     scale_f32 = scale.float()
+    expected_shape = (n_rb, n_cb)
 
-    n_row_blocks = (out_f + block_size - 1) // block_size
-    n_col_blocks = (in_f + block_size - 1) // block_size
+    if scale_f32.shape != expected_shape:
+        # Tolerate transposed scales produced by some conversion scripts
+        if scale_f32.shape == (n_cb, n_rb):
+            scale_f32 = scale_f32.t().contiguous()
+        else:
+            raise ValueError(
+                f"Scale shape {tuple(scale_f32.shape)} is inconsistent with "
+                f"weight shape {tuple(weight.shape)} and block_size={B}. "
+                f"Expected: {expected_shape}."
+            )
 
-    # Validate scale shape — tolerate transposed scale (some checkpoints)
-    expected = (n_row_blocks, n_col_blocks)
-    if scale_f32.shape == expected[::-1] and scale_f32.shape != expected:
-        # Transposed scale — rare but documented in some conversions
-        scale_f32 = scale_f32.t().contiguous()
+    # ---- Vectorised dequantisation -----------------------------------------
+    # Pad weight to an exact multiple of B in both dimensions
+    pad_r = (B - out_f % B) % B
+    pad_c = (B - in_f  % B) % B
 
-    if scale_f32.shape != expected:
-        raise ValueError(
-            f"Scale shape {tuple(scale_f32.shape)} is inconsistent with "
-            f"weight shape {tuple(weight.shape)} and block_size={block_size}. "
-            f"Expected scale shape: {expected}"
-        )
+    w_f32 = weight.float()  # FP8 → float32 (unavoidable for this tensor)
 
-    # Allocate output in float32; cast to target_dtype at the end
-    out = torch.empty(out_f, in_f, dtype=torch.float32, device=weight.device)
+    if pad_r > 0 or pad_c > 0:
+        w_f32 = torch.nn.functional.pad(w_f32, (0, pad_c, 0, pad_r))
 
-    # Process one 128×128 block at a time — avoids allocating the whole
-    # weight in float32 simultaneously when iterating over blocks.
-    w_f32 = weight.float()  # unavoidable: FP8→float32 for the whole tensor,
-    # but this is at most ~(out*in) bytes of float32 which is still just the
-    # single weight matrix — no worse than DTypeCastPipe for this tensor.
+    out_r = out_f + pad_r
+    out_c = in_f  + pad_c
 
-    for br in range(n_row_blocks):
-        r0 = br * block_size
-        r1 = min(r0 + block_size, out_f)
-        for bc in range(n_col_blocks):
-            c0 = bc * block_size
-            c1 = min(c0 + block_size, in_f)
-            s = scale_f32[br, bc]
-            if invert_scale:
-                out[r0:r1, c0:c1] = w_f32[r0:r1, c0:c1] / s
-            else:
-                out[r0:r1, c0:c1] = w_f32[r0:r1, c0:c1] * s
+    # Reshape: (n_rb*B, n_cb*B) → (n_rb, B, n_cb, B) → (n_rb, n_cb, B, B)
+    blocked = w_f32.view(n_rb, B, n_cb, B).permute(0, 2, 1, 3)
 
-    del w_f32
-    return out.to(target_dtype)
+    # scale: (n_rb, n_cb) → (n_rb, n_cb, 1, 1) for broadcast
+    s = scale_f32.unsqueeze(-1).unsqueeze(-1)
+
+    if invert_scale:
+        dequant_blocked = blocked / s
+    else:
+        dequant_blocked = blocked * s
+
+    # Restore original layout: (n_rb, n_cb, B, B) → (n_rb, B, n_cb, B) → (out_r, out_c)
+    result_padded = dequant_blocked.permute(0, 2, 1, 3).contiguous().view(out_r, out_c)
+
+    # Trim padding
+    result = result_padded[:out_f, :in_f]
+
+    del w_f32, blocked, dequant_blocked, result_padded
+    return result.to(target_dtype).contiguous()
