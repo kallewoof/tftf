@@ -121,6 +121,7 @@ class LoRAMergeBase(Pipe):
             lora_a = self._lora_weights[a_key].to(self.device)
             lora_b = self._lora_weights[b_key].to(self.device)
 
+            print(f"merging {record.key}")
             merged = merge_lora(
                 weight=record.tensor.to(self.device),
                 lora_a=lora_a,
