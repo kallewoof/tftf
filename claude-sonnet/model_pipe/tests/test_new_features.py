@@ -128,38 +128,45 @@ def _make_fsdp_shards(
     world_size: int = 2,
     rank: int = RANK,
     alpha: float = ALPHA,
+    out_features: int = 64,
+    in_features: int = 32,
 ) -> tuple[Path, Path, dict]:
     """
     Simulate world_size FSDP per-rank adapter shard files.
 
-    Each rank gets rows [i*chunk : (i+1)*chunk] of lora_A and lora_B
-    (where chunk = rank // world_size for lora_A rows).
+    FSDP shards tensors along dim 0 for every parameter.  For LoRA:
+      - lora_A shape (r, in):   chunk_a = r // world_size  rows per rank
+      - lora_B shape (out, r):  chunk_b = out // world_size rows per rank
+
+    Both are sharded along dim 0, so after cat(dim=0) we recover the full
+    (r, in) and (out, r) tensors respectively.
+
     Returns shard_dir, config_path, and the expected reconstructed lora weights.
     """
     assert rank % world_size == 0, "rank must be divisible by world_size for this fixture"
-    chunk = rank // world_size
+    assert out_features % world_size == 0, "out_features must be divisible by world_size"
+    chunk_a = rank        // world_size   # rows per rank for lora_A (r, in)
+    chunk_b = out_features // world_size  # rows per rank for lora_B (out, r)
 
     # Full lora tensors (what we expect after reconstruction)
-    full_lora_a_q = torch.randn(rank, 32) * 0.01
-    full_lora_b_q = torch.zeros(64, rank)
-    full_lora_a_v = torch.randn(rank, 32) * 0.01
-    full_lora_b_v = torch.zeros(64, rank)
+    full_lora_a_q = torch.randn(rank, in_features) * 0.01
+    full_lora_b_q = torch.zeros(out_features, rank)
+    full_lora_a_v = torch.randn(rank, in_features) * 0.01
+    full_lora_b_v = torch.zeros(out_features, rank)
 
     shard_dir = tmp / "fsdp_shards"
     shard_dir.mkdir()
 
     for i in range(world_size):
-        row_start = i * chunk
-        row_end   = (i + 1) * chunk
         shard_tensors = {
             "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight":
-                full_lora_a_q[row_start:row_end].clone(),
+                full_lora_a_q[i*chunk_a:(i+1)*chunk_a].clone(),
             "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight":
-                full_lora_b_q[row_start:row_end].clone(),
+                full_lora_b_q[i*chunk_b:(i+1)*chunk_b].clone(),
             "base_model.model.model.layers.0.self_attn.v_proj.lora_A.weight":
-                full_lora_a_v[row_start:row_end].clone(),
+                full_lora_a_v[i*chunk_a:(i+1)*chunk_a].clone(),
             "base_model.model.model.layers.0.self_attn.v_proj.lora_B.weight":
-                full_lora_b_v[row_start:row_end].clone(),
+                full_lora_b_v[i*chunk_b:(i+1)*chunk_b].clone(),
         }
         shard_path = shard_dir / f"rank_{i:02d}.safetensors"
         _save(shard_tensors, shard_path)
@@ -481,32 +488,39 @@ class TestFSDPShardMergePipe:
         """
         Manually verify that shards are concatenated correctly.
         Use nonzero lora_B so we can check the actual merge value.
+
+        FSDP shards both lora_A and lora_B along dim 0:
+          lora_A (r, in)   → chunk_a = r // world_size  rows per rank
+          lora_B (out, r)  → chunk_b = out // world_size rows per rank
         """
         world_size = 2
         r = 4
+        out_f = 64
+        in_f  = 32
         alpha = float(r)  # scale = 1.0
 
-        # Create a known full lora_A and lora_B (nonzero B)
-        full_a = torch.eye(r, 32)[:r]  # (r, 32) — first r rows of identity padded
-        full_b = torch.eye(64, r)[:64, :r]  # (64, r)
+        full_a = torch.eye(r, in_f)[:r]           # (r, 32)
+        full_b = torch.eye(out_f, r)[:out_f, :r]  # (64, r)
 
-        chunk = r // world_size
+        chunk_a = r    // world_size  # 2
+        chunk_b = out_f // world_size # 32
+
         shard_dir = tmp_path / "shards2"
         shard_dir.mkdir()
 
         for i in range(world_size):
             shard = {
                 "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight":
-                    full_a[i*chunk:(i+1)*chunk].clone(),
+                    full_a[i*chunk_a:(i+1)*chunk_a].clone(),
                 "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight":
-                    full_b[i*chunk:(i+1)*chunk].clone(),
+                    full_b[i*chunk_b:(i+1)*chunk_b].clone(),
             }
             _save(shard, shard_dir / f"rank_{i:02d}.safetensors")
 
         config = {"r": r, "lora_alpha": alpha, "target_modules": ["q_proj"]}
         (shard_dir / "adapter_config.json").write_text(json.dumps(config))
 
-        base_w = torch.zeros(64, 32)
+        base_w = torch.zeros(out_f, in_f)
         _save({"model.layers.0.self_attn.q_proj.weight": base_w}, tmp_path / "base.safetensors")
 
         out = tmp_path / "merged2.safetensors"

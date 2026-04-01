@@ -455,20 +455,23 @@ class TestFP8DequantPipeProcess:
         assert torch.allclose(out[0].tensor, norm)
 
     def test_multiple_pairs_interleaved(self):
+        # Weight keys must end in ".weight" so that scale key derivation
+        # round-trips: scale_inv_key_for("a.weight") = "a.weight_scale_inv"
+        # and weight_key_for_scale("a.weight_scale_inv") = "a.weight".
         with fp8_patch():
             pipe = FP8DequantPipe(torch.float32)
-            pipe._fp8_weight_keys = {"w0", "w1"}
-            pipe._use_inv_scale = {"w0": True, "w1": True}
+            pipe._fp8_weight_keys = {"a.weight", "b.weight"}
+            pipe._use_inv_scale = {"a.weight": True, "b.weight": True}
             out = list(pipe.process(iter([
-                TensorRecord("w0",               torch.full((128, 128), 1.0)),
-                TensorRecord("w1",               torch.full((128, 128), 2.0)),
-                TensorRecord("w0.weight_scale_inv", torch.full((1, 1), 2.0)),
-                TensorRecord("w1.weight_scale_inv", torch.full((1, 1), 3.0)),
+                TensorRecord("a.weight",               torch.full((128, 128), 1.0)),
+                TensorRecord("b.weight",               torch.full((128, 128), 2.0)),
+                TensorRecord("a.weight_scale_inv",     torch.full((1, 1), 2.0)),
+                TensorRecord("b.weight_scale_inv",     torch.full((1, 1), 3.0)),
             ])))
         assert len(out) == 2
         result = {r.key: r.tensor for r in out}
-        assert torch.allclose(result["w0"], torch.full((128, 128), 2.0), atol=1e-4)
-        assert torch.allclose(result["w1"], torch.full((128, 128), 6.0), atol=1e-4)
+        assert torch.allclose(result["a.weight"], torch.full((128, 128), 2.0), atol=1e-4)
+        assert torch.allclose(result["b.weight"], torch.full((128, 128), 6.0), atol=1e-4)
 
     def test_orphan_scale_warns(self, caplog):
         import logging
