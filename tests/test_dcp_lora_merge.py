@@ -656,9 +656,9 @@ class TestMergeLoraCLIAutoDetect:
         training_dir.mkdir()
         _make_training_dir(training_dir, [60])
 
-        out = tmp_path / "merged.safetensors"
+        out = tmp_path / "merged"
         self._run_merge(base_path, training_dir, out)
-        result = load_file(str(out))
+        result = load_file(str(out / "model.safetensors"))
         assert set(result.keys()) == set(base_tensors.keys())
 
     def test_training_dir_regular_lora_merges_correctly(self, tmp_path):
@@ -669,12 +669,34 @@ class TestMergeLoraCLIAutoDetect:
         training_dir.mkdir()
         _make_regular_lora_checkpoint(training_dir, [30, 90])
 
-        out = tmp_path / "merged.safetensors"
+        out = tmp_path / "merged"
         self._run_merge(base_path, training_dir, out)
-        result = load_file(str(out))
+        result = load_file(str(out / "model.safetensors"))
         assert set(result.keys()) == set(base_tensors.keys())
         # lora_B is all-ones so q_proj must differ from base
         assert not torch.allclose(
             result["model.layers.0.self_attn.q_proj.weight"],
             base_tensors["model.layers.0.self_attn.q_proj.weight"],
         )
+
+    def test_extras_copied_from_base_dir(self, tmp_path):
+        """Non-weight files from the base model directory appear in the output."""
+        base_dir = tmp_path / "base"
+        base_dir.mkdir()
+        base_path, base_tensors = _make_base_single(base_dir)
+        # Plant some extra files that should be copied
+        (base_dir / "config.json").write_text('{"model_type": "llama"}')
+        (base_dir / "tokenizer.json").write_text("{}")
+        # And files that must NOT be copied
+        (base_dir / "model.gguf").write_bytes(b"fake gguf")
+
+        training_dir = tmp_path / "training"
+        training_dir.mkdir()
+        _make_regular_lora_checkpoint(training_dir, [10])
+
+        out = tmp_path / "merged"
+        self._run_merge(base_path, training_dir, out)
+        assert (out / "config.json").exists()
+        assert (out / "tokenizer.json").exists()
+        assert not (out / "model.gguf").exists()
+        assert not (out / "model.safetensors.index.json").exists()

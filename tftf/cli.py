@@ -21,6 +21,7 @@ All write commands support:
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Union
@@ -201,13 +202,50 @@ def _make_writer(
     """
     Return the appropriate writer for the given flags.
 
-    Priority: dry_run > sharded > single-file.
+    *output_path* is always treated as a directory.  The directory is created
+    if it does not exist.  Priority: dry_run > sharded > single-file.
     """
     if dry_run:
         return NullWriter()
+    output_path.mkdir(parents=True, exist_ok=True)
     if sharded:
         return ShardedWriter(output_path, max_shard_bytes=max_shard_size)
-    return StreamingWriter(output_path)
+    return StreamingWriter(output_path / "model.safetensors")
+
+
+def _model_dir(path: Path) -> Path:
+    """Return the directory that contains a model's non-weight files.
+
+    If *path* is a directory (sharded model or model dir), return it directly.
+    If *path* is a file (single ``.safetensors``), return its parent — that
+    directory typically holds ``config.json``, tokenizer files, etc.
+    """
+    return path if path.is_dir() else path.parent
+
+
+def _copy_model_extras(src: Path, dst: Path) -> None:
+    """
+    Copy non-weight files from *src* (a model directory) into *dst* (the
+    output directory).
+
+    Skipped: ``*.safetensors``, ``*.safetensors.index.json``, ``*.gguf``.
+    These are either the weights being replaced or quantised derivatives that
+    are no longer valid after merging.  Everything else — configs, tokenizer
+    files, generation configs, etc. — is copied verbatim.
+
+    Does nothing if *src* is not a directory (e.g. a single-file model input).
+    """
+    if not src.is_dir():
+        return
+    log = logging.getLogger(__name__)
+    for f in sorted(src.iterdir()):
+        if not f.is_file():
+            continue
+        n = f.name
+        if n.endswith(".safetensors") or n.endswith(".safetensors.index.json") or n.endswith(".gguf"):
+            continue
+        shutil.copy2(f, dst / n)
+        log.info("Copied %s", n)
 
 
 def _finish_write(
@@ -343,8 +381,9 @@ def info(model: Path, key_filter: str | None, dtype_summary: bool, verbose: bool
 @cli.command()
 @click.option("-i", "--input", "input_path", required=True, type=_MODEL_PATH_TYPE,
               help="Input model (file, directory, or index.json).")
-@click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
-              help="Output path (file for default/sharded, directory for --sharded).")
+@click.option("-o", "--output", "output_path", required=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Output directory (created if absent).")
 @click.option("--dtype", type=click.Choice(list(_DTYPE_CHOICES), case_sensitive=False),
               default=None, help="Cast all tensors to this dtype.")
 @click.option("--include", "include_patterns", multiple=True, metavar="GLOB",
@@ -374,16 +413,16 @@ def passthrough(
     \b
     Examples:
         # Copy and cast to bfloat16
-        tftf passthrough -i ./llama-70b/ -o ./out.safetensors --dtype bfloat16
+        tftf passthrough -i ./llama-70b/ -o ./out/ --dtype bfloat16
 
         # Write output as shards
         tftf passthrough -i ./model.safetensors -o ./out/ --sharded
 
         # Validate without writing
-        tftf passthrough -i ./model.safetensors -o /dev/null --dry-run
+        tftf passthrough -i ./model.safetensors -o ./out/ --dry-run
 
         # Copy only attention weights
-        tftf passthrough -i ./model.safetensors -o ./attn.safetensors \\
+        tftf passthrough -i ./model.safetensors -o ./attn/ \\
             --include '*self_attn*'
     """
     _setup_logging(verbose)
@@ -405,6 +444,8 @@ def passthrough(
         writer=writer,
     ).run(show_progress=not no_progress)
     _finish_write(writer)
+    if not dry_run:
+        _copy_model_extras(_model_dir(input_path), output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -418,8 +459,9 @@ def passthrough(
 @click.option("-a", "--adapter", "adapter_path", required=True,
               type=click.Path(exists=True, dir_okay=True, path_type=Path),
               help="LoRA adapter_model.safetensors, adapter dir, or training output directory.")
-@click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
-              help="Output path.")
+@click.option("-o", "--output", "output_path", required=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Output directory (created if absent).")
 @click.option("--adapter-config", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="adapter_config.json (auto-detected from adapter dir if omitted).")
 @click.option("--adapter-name", default="default", show_default=True)
@@ -466,17 +508,17 @@ def merge_lora(
     Examples:
         tftf merge-lora \\
             -b ./llama-7b/ -a ./my-lora/adapter_model.safetensors \\
-            -o ./merged.safetensors --dtype bfloat16
+            -o ./merged/ --dtype bfloat16
 
         # Pass a training output directory — format auto-detected
         tftf merge-lora \\
             -b ./llama-7b/ -a ./training-output/ \\
-            -o ./merged.safetensors --dtype bfloat16
+            -o ./merged/ --dtype bfloat16
 
         # Validate merge without writing
         tftf merge-lora \\
             -b ./llama-7b/ -a ./adapter_model.safetensors \\
-            -o /dev/null --dry-run
+            -o ./merged/ --dry-run
 
         # Write as shards, with key renaming
         tftf merge-lora \\
@@ -520,6 +562,8 @@ def merge_lora(
         writer=writer,
     ).run(show_progress=not no_progress, progress_desc="merge-lora")
     _finish_write(writer)
+    if not dry_run:
+        _copy_model_extras(_model_dir(base_path), output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -533,8 +577,9 @@ def merge_lora(
 @click.option("-c", "--checkpoint-dir", "checkpoint_dir", required=True,
               type=click.Path(exists=True, file_okay=False, path_type=Path),
               help="PyTorch DCP checkpoint directory (e.g. pytorch_model_fsdp_0/).")
-@click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
-              help="Output path.")
+@click.option("-o", "--output", "output_path", required=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Output directory (created if absent).")
 @click.option("--adapter-config", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="adapter_config.json (auto-detected from parent of checkpoint-dir if omitted).")
 @click.option("--adapter-name", default="default", show_default=True)
@@ -581,7 +626,7 @@ def merge_dcp_lora(
         tftf merge-dcp-lora \\
             -b ./llama-7b/ \\
             -c ./checkpoint-60/pytorch_model_fsdp_0 \\
-            -o ./merged.safetensors --dtype bfloat16
+            -o ./merged/ --dtype bfloat16
 
         # Write as shards
         tftf merge-dcp-lora \\
@@ -593,7 +638,7 @@ def merge_dcp_lora(
         tftf merge-dcp-lora \\
             -b ./llama-7b/ \\
             -c ./checkpoint-60/pytorch_model_fsdp_0 \\
-            -o /dev/null --dry-run
+            -o ./merged/ --dry-run
     """
     _setup_logging(verbose)
 
@@ -620,6 +665,8 @@ def merge_dcp_lora(
         writer=writer,
     ).run(show_progress=not no_progress, progress_desc="merge-dcp-lora")
     _finish_write(writer)
+    if not dry_run:
+        _copy_model_extras(_model_dir(base_path), output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -695,8 +742,9 @@ def validate(model: Path, pipe_spec: str | None, verbose: bool) -> None:
 @cli.command("dequant-fp8")
 @click.option("-i", "--input", "input_path", required=True, type=_MODEL_PATH_TYPE,
               help="Fine-grained FP8 model (file, directory, or index.json).")
-@click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
-              help="Output path.")
+@click.option("-o", "--output", "output_path", required=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Output directory (created if absent).")
 @click.option(
     "--dtype",
     type=click.Choice(["bfloat16", "float16", "float32"], case_sensitive=False),
@@ -770,10 +818,10 @@ def dequant_fp8(
             --merge-lora ./my-lora/adapter_model.safetensors \\
             --sharded --dry-run
 
-        # Dequantise to float16, write as a single file
+        # Dequantise to float16
         tftf dequant-fp8 \\
             -i ./model.safetensors \\
-            -o ./model-fp16.safetensors \\
+            -o ./model-fp16/ \\
             --dtype float16
     """
     from tftf.pipes.fp8_dequant import FP8DequantPipe
@@ -806,3 +854,5 @@ def dequant_fp8(
         writer=writer,
     ).run(show_progress=not no_progress, progress_desc="dequant-fp8")
     _finish_write(writer)
+    if not dry_run:
+        _copy_model_extras(_model_dir(input_path), output_path)
