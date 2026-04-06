@@ -72,6 +72,55 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _resolve_dcp_checkpoint(path: Path) -> Path:
+    """
+    If *path* looks like a training output directory, locate the latest
+    checkpoint subdirectory and return the DCP directory within it.
+
+    A training output directory is detected by the presence of
+    ``adapter_config.json`` alongside ``checkpoint-<N>`` subdirectories.
+    The latest checkpoint is selected by the highest step number.  Within
+    that checkpoint the first subdirectory containing a ``.metadata`` file
+    is used as the DCP root.
+
+    If *path* does not look like a training directory it is returned unchanged.
+    """
+    import re
+
+    # If this is already a DCP shard directory, use it as-is.
+    if (path / ".metadata").exists():
+        return path
+
+    checkpoint_dirs = [
+        d for d in path.iterdir()
+        if d.is_dir() and re.fullmatch(r"checkpoint-\d+", d.name)
+    ]
+    if not checkpoint_dirs:
+        return path
+
+    latest = max(checkpoint_dirs, key=lambda d: int(d.name.split("-")[1]))
+    click.echo(
+        f"Training directory detected — using latest checkpoint: {latest.name}",
+        err=True,
+    )
+
+    # Find the DCP subdirectory (contains a .metadata file)
+    dcp_subdirs = [d for d in latest.iterdir() if d.is_dir() and (d / ".metadata").exists()]
+    if not dcp_subdirs:
+        raise click.BadParameter(
+            f"No DCP directory (with .metadata) found inside {latest}.",
+            param_hint="-c / --checkpoint-dir",
+        )
+
+    dcp_dir = dcp_subdirs[0]
+    if len(dcp_subdirs) > 1:
+        click.echo(
+            f"Multiple DCP subdirectories found; using {dcp_dir.name}",
+            err=True,
+        )
+    return dcp_dir
+
+
 def _open_reader(path: Path, device: str = "cpu"):
     """Return SafetensorsReader or ShardedSafetensorsReader depending on path type."""
     return ShardedSafetensorsReader.from_path(path, device=device)
@@ -459,6 +508,8 @@ def merge_dcp_lora(
             -o /dev/null --dry-run
     """
     _setup_logging(verbose)
+
+    checkpoint_dir = _resolve_dcp_checkpoint(checkpoint_dir)
 
     pipe: Pipe = PassthroughPipe()
     if rename_rules:

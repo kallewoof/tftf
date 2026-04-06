@@ -1,4 +1,4 @@
-"""Tests for DCPLoRAMergePipe — PyTorch DCP checkpoint LoRA and DoRA merging."""
+"""Tests for DCPLoRAMergePipe — PyTorch DCP checkpoint LoRA and DoRA merging, and CLI checkpoint resolution."""
 
 from __future__ import annotations
 
@@ -443,3 +443,102 @@ class TestDCPDoRAMergePipe:
             r_dora["model.layers.0.self_attn.q_proj.weight"],
             r_lora["model.layers.0.self_attn.q_proj.weight"],
         ), "DoRA and LoRA merges should produce different results"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_dcp_checkpoint (CLI helper)
+# ---------------------------------------------------------------------------
+
+
+def _make_training_dir(tmp: Path, checkpoint_steps: list[int], dcp_name: str = "pytorch_model_fsdp_0") -> Path:
+    """
+    Create a synthetic training output directory:
+        tmp/
+          adapter_config.json
+          config.json
+          checkpoint-<N>/
+            <dcp_name>/
+              .metadata   ← marks it as a DCP dir
+          ...
+    Returns the training output directory path.
+    """
+    import torch.distributed.checkpoint as dist_cp
+
+    (tmp / "adapter_config.json").write_text(json.dumps({"r": 4, "lora_alpha": 8.0}))
+    (tmp / "config.json").write_text("{}")
+    for step in checkpoint_steps:
+        ckpt = tmp / f"checkpoint-{step}"
+        dcp = ckpt / dcp_name
+        dcp.mkdir(parents=True)
+        # Write a minimal DCP checkpoint so .metadata exists
+        dist_cp.save(
+            state_dict={"x": torch.zeros(1)},
+            storage_writer=dist_cp.FileSystemWriter(dcp),
+            no_dist=True,
+        )
+    return tmp
+
+
+class TestResolveDcpCheckpoint:
+    """Unit tests for tftf.cli._resolve_dcp_checkpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from tftf.cli import _resolve_dcp_checkpoint
+        self.resolve = _resolve_dcp_checkpoint
+
+    def test_passthrough_when_already_dcp_dir(self, tmp_path):
+        """A directory containing .metadata is returned unchanged."""
+        import torch.distributed.checkpoint as dist_cp
+
+        dcp = tmp_path / "pytorch_model_fsdp_0"
+        dcp.mkdir()
+        dist_cp.save(
+            state_dict={"x": torch.zeros(1)},
+            storage_writer=dist_cp.FileSystemWriter(dcp),
+            no_dist=True,
+        )
+        assert self.resolve(dcp) == dcp
+
+    def test_passthrough_when_no_checkpoints(self, tmp_path):
+        """A directory without checkpoint-* subdirs is returned unchanged."""
+        (tmp_path / "some_file.txt").write_text("hello")
+        assert self.resolve(tmp_path) == tmp_path
+
+    def test_selects_latest_checkpoint(self, tmp_path):
+        """The checkpoint with the highest step number is selected."""
+        training_dir = _make_training_dir(tmp_path, [30, 60, 111])
+        result = self.resolve(training_dir)
+        assert result.parent.name == "checkpoint-111"
+
+    def test_selects_latest_with_non_sequential_steps(self, tmp_path):
+        """Latest is determined numerically, not lexicographically."""
+        # lexicographic order would pick checkpoint-90, numeric picks checkpoint-111
+        training_dir = _make_training_dir(tmp_path, [30, 90, 111])
+        result = self.resolve(training_dir)
+        assert result.parent.name == "checkpoint-111"
+
+    def test_single_checkpoint(self, tmp_path):
+        """Works correctly when only one checkpoint exists."""
+        training_dir = _make_training_dir(tmp_path, [42])
+        result = self.resolve(training_dir)
+        assert result.parent.name == "checkpoint-42"
+
+    def test_returns_dcp_subdir(self, tmp_path):
+        """Returned path points to the DCP subdir, not the checkpoint dir itself."""
+        training_dir = _make_training_dir(tmp_path, [60], dcp_name="pytorch_model_fsdp_0")
+        result = self.resolve(training_dir)
+        assert (result / ".metadata").exists()
+        assert result.name == "pytorch_model_fsdp_0"
+
+    def test_no_dcp_subdir_raises(self, tmp_path):
+        """Raises BadParameter when the latest checkpoint has no DCP subdir."""
+        import click
+
+        ckpt = tmp_path / "checkpoint-10"
+        ckpt.mkdir()
+        # no subdir with .metadata inside
+        (tmp_path / "adapter_config.json").write_text("{}")
+
+        with pytest.raises(click.BadParameter, match="No DCP directory"):
+            self.resolve(tmp_path)
