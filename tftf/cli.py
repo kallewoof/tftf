@@ -7,6 +7,7 @@ info              Print tensor names, shapes, dtypes, and file metadata.
 passthrough       Copy a model one tensor at a time.
 merge-lora        Fuse a single-file LoRA adapter into a base model.
 merge-fsdp-lora   Fuse a per-rank FSDP-sharded LoRA adapter into a base model.
+merge-dcp-lora    Fuse a DCP-format FSDP-sharded LoRA adapter into a base model.
 validate          Dry-run the pipeline and report validation results.
 
 All commands accept single .safetensors files, sharded directories, or
@@ -35,6 +36,7 @@ from tftf.io.writer import StreamingWriter, _DTYPE_ITEMSIZE
 from tftf.pipeline import Pipeline
 from tftf.pipes.base import Pipe
 from tftf.pipes.dtype_cast import DTypeCastPipe
+from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
 from tftf.pipes.fsdp_lora_merge import FSDPShardMergePipe
 from tftf.pipes.key_filter import KeyFilterPipe
 from tftf.pipes.key_rename import KeyRenamePipe
@@ -488,6 +490,104 @@ def merge_fsdp_lora(
         pipe=pipe,
         writer=writer,
     ).run(show_progress=not no_progress, progress_desc="merge-fsdp-lora")
+    _finish_write(writer)
+
+
+# ---------------------------------------------------------------------------
+# merge-dcp-lora
+# ---------------------------------------------------------------------------
+
+
+@cli.command("merge-dcp-lora")
+@click.option("-b", "--base", "base_path", required=True, type=_MODEL_PATH_TYPE,
+              help="Base model (file, directory, or index.json).")
+@click.option("-c", "--checkpoint-dir", "checkpoint_dir", required=True,
+              type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help="PyTorch DCP checkpoint directory (e.g. pytorch_model_fsdp_0/).")
+@click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
+              help="Output path.")
+@click.option("--adapter-config", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="adapter_config.json (auto-detected from parent of checkpoint-dir if omitted).")
+@click.option("--adapter-name", default="default", show_default=True)
+@click.option("--scale", default=1.0, show_default=True, type=float,
+              help="Extra scale on top of alpha/r  (1.0 = standard LoRA).")
+@click.option("--device", default="cpu", show_default=True,
+              help="Torch device for merge computation.")
+@click.option("--dtype", type=click.Choice(list(_DTYPE_CHOICES), case_sensitive=False),
+              default=None, help="Cast merged weights to this dtype.")
+@click.option("--rename", "rename_rules", multiple=True, nargs=2,
+              metavar="PATTERN REPLACEMENT",
+              help="Rename tensor keys via regex before merging (repeatable).")
+@_common_write_options
+@click.option("--no-progress", is_flag=True)
+@click.option("-v", "--verbose", is_flag=True)
+def merge_dcp_lora(
+    base_path: Path,
+    checkpoint_dir: Path,
+    output_path: Path,
+    adapter_config: Optional[Path],
+    adapter_name: str,
+    scale: float,
+    device: str,
+    dtype: Optional[str],
+    rename_rules: tuple[tuple[str, str], ...],
+    dry_run: bool,
+    sharded: bool,
+    max_shard_size: int,
+    no_progress: bool,
+    verbose: bool,
+) -> None:
+    """
+    Fuse a DCP-format FSDP-sharded LoRA adapter into a base model.
+
+    Reads a PyTorch Distributed Checkpoint (DCP) directory produced by FSDP
+    training (e.g. axolotl's pytorch_model_fsdp_0/), reconstructs the full
+    LoRA matrices automatically, and merges them into the base model stream.
+
+    adapter_config.json is auto-detected from the parent directory of
+    --checkpoint-dir (the typical axolotl layout).
+
+    \b
+    Examples:
+        tftf merge-dcp-lora \\
+            -b ./llama-7b/ \\
+            -c ./checkpoint-60/pytorch_model_fsdp_0 \\
+            -o ./merged.safetensors --dtype bfloat16
+
+        # Write as shards
+        tftf merge-dcp-lora \\
+            -b ./llama-7b/ \\
+            -c ./checkpoint-60/pytorch_model_fsdp_0 \\
+            -o ./merged/ --sharded --dtype bfloat16
+
+        # Dry-run validation first
+        tftf merge-dcp-lora \\
+            -b ./llama-7b/ \\
+            -c ./checkpoint-60/pytorch_model_fsdp_0 \\
+            -o /dev/null --dry-run
+    """
+    _setup_logging(verbose)
+
+    pipe: Pipe = PassthroughPipe()
+    if rename_rules:
+        pipe = pipe | KeyRenamePipe(list(rename_rules))
+    pipe = pipe | DCPLoRAMergePipe(
+        checkpoint_dir=checkpoint_dir,
+        config_path=adapter_config,
+        adapter_name=adapter_name,
+        scale=scale,
+        device=device,
+    )
+    if dtype:
+        pipe = pipe | DTypeCastPipe(_DTYPE_CHOICES[dtype])
+
+    writer = _make_writer(output_path, dry_run=dry_run, sharded=sharded,
+                          max_shard_size=max_shard_size)
+    Pipeline(
+        reader=_open_reader(base_path, device=device),
+        pipe=pipe,
+        writer=writer,
+    ).run(show_progress=not no_progress, progress_desc="merge-dcp-lora")
     _finish_write(writer)
 
 
