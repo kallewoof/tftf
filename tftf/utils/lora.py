@@ -1,5 +1,5 @@
 """
-LoRA key-mapping utilities and merge math.
+LoRA / DoRA key-mapping utilities and merge math.
 
 Key naming conventions
 ----------------------
@@ -9,35 +9,44 @@ and a ``.lora_A.weight`` / ``.lora_B.weight`` suffix.
 For embedding layers the keys are ``.lora_embedding_A`` / ``.lora_embedding_B``
 (no ``.weight`` suffix; multiply order is reversed).
 
+DoRA adapters additionally store a magnitude vector under the key
+``.lora_magnitude_vector.{adapter_name}.weight`` (or without the adapter name
+in some PEFT versions).
+
 This module tries every common variant so it works with adapters produced by
 different PEFT versions without requiring configuration.
+
+DoRA / QDoRA detection
+----------------------
+DoRA presence is detected by looking up a magnitude vector key for the base
+weight.  If one is found, ``merge_dora()`` is used; otherwise the standard
+``merge_lora()`` is applied.  QDoRA (DoRA trained on a quantized base model)
+uses the identical merge formula — the quantisation was only active during
+training.
 
 Merge formulas
 --------------
 
-Linear  (weight ndim == 2):
+LoRA — Linear  (weight ndim == 2):
     delta = lora_B @ lora_A        # (out, r) @ (r, in) → (out, in)
     W_out = W + scale * delta
 
-Embedding  (weight ndim == 2, but flagged is_embedding=True):
-    delta = lora_A @ lora_B        # (num_emb, r) @ (r, emb_dim) → (num_emb, emb_dim)
+LoRA — Embedding  (weight ndim == 2, is_embedding=True):
+    delta = lora_A @ lora_B        # (num_emb, r) @ (r, emb_dim)
     W_out = W + scale * delta
 
-Convolutional  (weight ndim >= 3 — Conv1d / Conv2d / Conv3d):
-    All PEFT convolutional LoRA variants follow the same pattern regardless
-    of kernel dimensionality:
+LoRA — Convolutional  (weight ndim >= 3):
+    Flatten spatial dims, 2-D matmul, reshape back.
+    W_out = W + scale * delta
 
-        lora_A  shape: (r,  in_channels, *kernel_size)  — full-kernel conv
-        lora_B  shape: (out_channels, r, *ones)         — pointwise 1×…×1 conv
+DoRA — Linear / Embedding / Convolutional:
+    Same delta computation as LoRA, then:
+        W_merged   = W + scale * delta
+        weight_norm = ||W_merged|| per output channel  (row-wise for 2-D,
+                      all-but-first-dim for conv)
+        W_out = (m / weight_norm).unsqueeze(-1...) * W_merged
 
-    The delta is computed via a 2-D matmul on flattened spatial dims:
-
-        a2d   = lora_A.reshape(r, in_channels * prod(kernel_size))
-        b2d   = lora_B.reshape(out_channels, r)
-        delta = (b2d @ a2d).reshape(out_channels, in_channels, *kernel_size)
-
-    This is equivalent to PEFT's conv-based formula for Conv2d and generalises
-    naturally to Conv1d (ndim=3), Conv2d (ndim=4), and Conv3d (ndim=5).
+    where m is the learned magnitude vector of shape (out_channels,).
 
 All computation is done in float32 for numerical stability.
 """
@@ -116,6 +125,16 @@ def _embedding_variants(adapter_name: str) -> list[tuple[str, str]]:
     ]
 
 
+def _magnitude_variants(adapter_name: str) -> list[str]:
+    """DoRA magnitude vector key suffixes, in priority order."""
+    return [
+        f".lora_magnitude_vector.{adapter_name}.weight",
+        ".lora_magnitude_vector.weight",
+        f".lora_magnitude_vector.{adapter_name}",
+        ".lora_magnitude_vector",
+    ]
+
+
 def find_lora_keys(
     base_key: str,
     adapter_key_set: set[str],
@@ -149,6 +168,29 @@ def find_lora_keys(
             b_key = f"{prefix}{stem}{b_suf}"
             if a_key in adapter_key_set and b_key in adapter_key_set:
                 return a_key, b_key, True
+
+    return None
+
+
+def find_magnitude_key(
+    base_key: str,
+    adapter_key_set: set[str],
+    adapter_name: str = "default",
+) -> Optional[str]:
+    """
+    Search *adapter_key_set* for the DoRA magnitude vector that corresponds
+    to *base_key*.
+
+    Returns the matched key string, or ``None`` if the adapter is plain LoRA
+    (no magnitude vector).
+    """
+    stem = base_key.removesuffix(".weight")
+
+    for prefix in _PREFIXES:
+        for suf in _magnitude_variants(adapter_name):
+            mag_key = f"{prefix}{stem}{suf}"
+            if mag_key in adapter_key_set:
+                return mag_key
 
     return None
 
@@ -231,3 +273,97 @@ def merge_lora(
         )
 
     return (w + scale * delta).to(orig_dtype)
+
+
+def merge_dora(
+    weight: torch.Tensor,
+    lora_a: torch.Tensor,
+    lora_b: torch.Tensor,
+    magnitude: torch.Tensor,
+    scale: float,
+    is_embedding: bool = False,
+) -> torch.Tensor:
+    """
+    Fuse DoRA (or QDoRA) weights into *weight* and return the merged tensor.
+
+    DoRA decomposes weight updates into direction (LoRA A/B matrices) and
+    magnitude (a per-output-channel scalar vector *m*).  The merge formula is:
+
+        W_merged   = W + scale * delta          (standard LoRA update)
+        weight_norm = ||W_merged|| per output channel
+        W_out      = (m / weight_norm) * W_merged
+
+    where *delta* follows the same convention as ``merge_lora``:
+
+    - **Linear / Conv1D** (ndim=2, is_embedding=False):   delta = lora_B @ lora_A
+    - **Embedding**       (ndim=2, is_embedding=True):    delta = lora_A @ lora_B
+    - **Convolutional**   (ndim>=3):   2-D matmul on flattened spatial dims
+
+    The norm is taken row-wise (i.e. over all dims except the first) so that
+    *weight_norm* has shape ``(out_channels,)``, matching the stored magnitude
+    vector shape.
+
+    QDoRA adapters (DoRA trained on a quantised base) use the identical formula;
+    the quantisation affects only training, not static merging.
+
+    All computation is performed in float32 for numerical stability.
+    The result is cast back to ``weight``'s original dtype.
+
+    Args:
+        weight:     Base model weight tensor (ndim >= 2).
+        lora_a:     LoRA A matrix.
+        lora_b:     LoRA B matrix.
+        magnitude:  Learned magnitude vector of shape ``(out_channels,)``
+                    (or a squeezable variant stored by some PEFT versions).
+        scale:      Effective scale factor (lora_alpha / r * user_scale).
+        is_embedding: If True, use embedding multiply order (A @ B).
+
+    Raises:
+        ValueError: If ``weight.ndim`` < 2.
+    """
+    orig_dtype = weight.dtype
+
+    w = weight.float()
+    a = lora_a.float()
+    b = lora_b.float()
+    m = magnitude.float().squeeze()  # normalise storage quirks from conv
+
+    ndim = weight.ndim
+
+    if ndim == 2:
+        if is_embedding:
+            delta = a @ b
+        else:
+            delta = b @ a
+    elif ndim >= 3:
+        out_channels = b.shape[0]
+        r = b.shape[1]
+        kernel_shape = a.shape[2:]
+        in_channels = a.shape[1]
+
+        kernel_numel = 1
+        for s in kernel_shape:
+            kernel_numel *= s
+
+        a2d = a.reshape(r, in_channels * kernel_numel)
+        b2d = b.reshape(out_channels, r)
+        delta = (b2d @ a2d).reshape(out_channels, in_channels, *kernel_shape)
+    else:
+        raise ValueError(
+            f"merge_dora: weight has ndim={ndim}, shape={tuple(weight.shape)}.  "
+            f"Expected ndim >= 2."
+        )
+
+    w_merged = w + scale * delta
+
+    # Per-output-channel L2 norm: reduce over all dims except the first.
+    reduce_dims = tuple(range(1, w_merged.dim()))
+    weight_norm = w_merged.norm(p=2, dim=reduce_dims).clamp(min=1e-8)  # (out_channels,)
+
+    mag_norm_scale = m / weight_norm  # (out_channels,)
+
+    # Broadcast (out_channels,) to the full weight shape
+    view_shape = (mag_norm_scale.shape[0],) + (1,) * (w_merged.dim() - 1)
+    result = mag_norm_scale.view(view_shape) * w_merged
+
+    return result.to(orig_dtype)

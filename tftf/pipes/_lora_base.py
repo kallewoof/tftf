@@ -25,7 +25,7 @@ from typing import Iterator, Optional
 import torch
 
 from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
-from tftf.utils.lora import LoRAConfig, find_lora_keys, merge_lora
+from tftf.utils.lora import LoRAConfig, find_lora_keys, find_magnitude_key, merge_dora, merge_lora
 
 
 logger = logging.getLogger(__name__)
@@ -134,21 +134,44 @@ class LoRAMergeBase(Pipe):
             lora_a = self._lora_weights[a_key].to(self.device)
             lora_b = self._lora_weights[b_key].to(self.device)
 
-            print(f"merging {record.key}")
-            merged = merge_lora(
-                weight=record.tensor.to(self.device),
-                lora_a=lora_a,
-                lora_b=lora_b,
-                scale=effective_scale,
-                is_embedding=is_embedding,
-            )
-            logger.debug(
-                "Merged %s → %s  [%s]  scale=%.6f",
-                type(self).__name__,
+            mag_key = find_magnitude_key(
                 record.key,
-                "embedding" if is_embedding else "linear",
-                effective_scale,
+                self._adapter_key_set,
+                self.adapter_name,
             )
+
+            if mag_key is not None:
+                magnitude = self._lora_weights[mag_key].to(self.device)
+                merged = merge_dora(
+                    weight=record.tensor.to(self.device),
+                    lora_a=lora_a,
+                    lora_b=lora_b,
+                    magnitude=magnitude,
+                    scale=effective_scale,
+                    is_embedding=is_embedding,
+                )
+                logger.debug(
+                    "Merged DoRA %s → %s  [%s]  scale=%.6f",
+                    type(self).__name__,
+                    record.key,
+                    "embedding" if is_embedding else "linear",
+                    effective_scale,
+                )
+            else:
+                merged = merge_lora(
+                    weight=record.tensor.to(self.device),
+                    lora_a=lora_a,
+                    lora_b=lora_b,
+                    scale=effective_scale,
+                    is_embedding=is_embedding,
+                )
+                logger.debug(
+                    "Merged LoRA %s → %s  [%s]  scale=%.6f",
+                    type(self).__name__,
+                    record.key,
+                    "embedding" if is_embedding else "linear",
+                    effective_scale,
+                )
 
             yield TensorRecord(
                 key=record.key,
