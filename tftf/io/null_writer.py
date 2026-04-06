@@ -24,9 +24,8 @@ from __future__ import annotations
 import time
 import types
 from dataclasses import dataclass, field
-from typing import Optional
 
-from tftf.io.writer import _TORCH_TO_ST, _nbytes, StreamingWriter
+from tftf.io.writer import _TORCH_TO_ST, StreamingWriter, _nbytes
 from tftf.pipes.base import TensorMeta, TensorRecord
 
 
@@ -111,7 +110,7 @@ class NullWriter(StreamingWriter):
     def prepare(
         self,
         metas: list[TensorMeta],
-        file_metadata: Optional[dict[str, str]] = None,
+        file_metadata: dict[str, str] | None = None,
     ) -> None:
         self._t0 = time.monotonic()
         seen_keys: set[str] = set()

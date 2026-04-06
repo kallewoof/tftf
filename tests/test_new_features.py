@@ -11,7 +11,6 @@ Tests for:
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -22,13 +21,10 @@ from tftf.io.reader import SafetensorsReader
 from tftf.io.sharded_reader import ShardedSafetensorsReader
 from tftf.io.writer import StreamingWriter
 from tftf.pipeline import Pipeline, ReaderProtocol
-from tftf.pipes.base import TensorMeta, TensorRecord
-from tftf.pipes.dtype_cast import DTypeCastPipe
+from tftf.pipes.base import TensorMeta
 from tftf.pipes.key_filter import KeyFilterPipe
 from tftf.pipes.key_rename import KeyRenamePipe
-from tftf.pipes.lora_merge import LoRAMergePipe
 from tftf.pipes.passthrough import PassthroughPipe
-from tftf.utils.lora import merge_lora
 
 
 # ---------------------------------------------------------------------------

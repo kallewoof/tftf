@@ -18,12 +18,13 @@ Only one tensor is in Python memory at any point during Phase 2.
 from __future__ import annotations
 
 import logging
-from typing import Iterator, Optional, Protocol, runtime_checkable
+from typing import Iterator, Protocol, runtime_checkable
 
 from tqdm import tqdm
 
 from tftf.io.writer import StreamingWriter
 from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
+
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ class Pipeline:
     def run(
         self,
         show_progress: bool = True,
-        progress_desc: Optional[str] = None,
+        progress_desc: str | None = None,
     ) -> None:
         """
         Execute the two-pass pipeline.

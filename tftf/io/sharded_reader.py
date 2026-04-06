@@ -47,6 +47,7 @@ from typing import Iterator
 from tftf.io.reader import SafetensorsReader
 from tftf.pipes.base import TensorMeta, TensorRecord
 
+
 logger = logging.getLogger(__name__)
 
 _INDEX_FILENAMES = [
@@ -109,7 +110,7 @@ class ShardedSafetensorsReader(SafetensorsReader):
         cls,
         path: Path | str,
         device: str = "cpu",
-    ) -> "ShardedSafetensorsReader | SafetensorsReader":
+    ) -> ShardedSafetensorsReader | SafetensorsReader:
         """
         Return the appropriate reader for *path*:
 

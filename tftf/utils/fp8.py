@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import torch
 
+
 # ---------------------------------------------------------------------------
 # FP8 dtype set — built defensively to handle PyTorch < 2.1
 # ---------------------------------------------------------------------------

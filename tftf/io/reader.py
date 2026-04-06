@@ -34,6 +34,7 @@ from safetensors import safe_open
 
 from tftf.pipes.base import TensorMeta, TensorRecord
 
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

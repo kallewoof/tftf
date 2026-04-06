@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 import click
 import torch
@@ -31,15 +31,16 @@ import torch
 from tftf.io.null_writer import NullWriter, ValidationReport
 from tftf.io.sharded_reader import ShardedSafetensorsReader
 from tftf.io.sharded_writer import ShardedWriter
-from tftf.io.writer import StreamingWriter, _DTYPE_ITEMSIZE
+from tftf.io.writer import _DTYPE_ITEMSIZE, StreamingWriter
 from tftf.pipeline import Pipeline
 from tftf.pipes.base import Pipe
-from tftf.pipes.dtype_cast import DTypeCastPipe
 from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+from tftf.pipes.dtype_cast import DTypeCastPipe
 from tftf.pipes.key_filter import KeyFilterPipe
 from tftf.pipes.key_rename import KeyRenamePipe
 from tftf.pipes.lora_merge import LoRAMergePipe
 from tftf.pipes.passthrough import PassthroughPipe
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -164,7 +165,7 @@ def cli() -> None:
     help="Print a dtype/count table instead of per-tensor rows.",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug logging.")
-def info(model: Path, key_filter: Optional[str], dtype_summary: bool, verbose: bool) -> None:
+def info(model: Path, key_filter: str | None, dtype_summary: bool, verbose: bool) -> None:
     """
     Print tensor metadata for MODEL.
 
@@ -242,7 +243,7 @@ def info(model: Path, key_filter: Optional[str], dtype_summary: bool, verbose: b
 def passthrough(
     input_path: Path,
     output_path: Path,
-    dtype: Optional[str],
+    dtype: str | None,
     include_patterns: tuple[str, ...],
     exclude_patterns: tuple[str, ...],
     dry_run: bool,
@@ -324,11 +325,11 @@ def merge_lora(
     base_path: Path,
     adapter_path: Path,
     output_path: Path,
-    adapter_config: Optional[Path],
+    adapter_config: Path | None,
     adapter_name: str,
     scale: float,
     device: str,
-    dtype: Optional[str],
+    dtype: str | None,
     rename_rules: tuple[tuple[str, str], ...],
     dry_run: bool,
     sharded: bool,
@@ -416,11 +417,11 @@ def merge_dcp_lora(
     base_path: Path,
     checkpoint_dir: Path,
     output_path: Path,
-    adapter_config: Optional[Path],
+    adapter_config: Path | None,
     adapter_name: str,
     scale: float,
     device: str,
-    dtype: Optional[str],
+    dtype: str | None,
     rename_rules: tuple[tuple[str, str], ...],
     dry_run: bool,
     sharded: bool,
@@ -497,7 +498,7 @@ def merge_dcp_lora(
     ),
 )
 @click.option("-v", "--verbose", is_flag=True)
-def validate(model: Path, pipe_spec: Optional[str], verbose: bool) -> None:
+def validate(model: Path, pipe_spec: str | None, verbose: bool) -> None:
     """
     Validate a model file or pipeline without writing anything to disk.
 
@@ -592,8 +593,8 @@ def dequant_fp8(
     input_path: Path,
     output_path: Path,
     dtype: str,
-    lora_adapter: Optional[Path],
-    lora_config: Optional[Path],
+    lora_adapter: Path | None,
+    lora_config: Path | None,
     lora_scale: float,
     lora_adapter_name: str,
     block_size: int,

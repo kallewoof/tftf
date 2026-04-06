@@ -44,7 +44,7 @@ consume the iterator to populate the internal key maps.
 from __future__ import annotations
 
 import logging
-from typing import Iterator, Optional
+from typing import Iterator
 
 import torch
 
@@ -58,6 +58,7 @@ from tftf.utils.fp8 import (
     scale_key_for,
     weight_key_for_scale,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -210,9 +211,9 @@ class FP8DequantPipe(Pipe):
         fp8_keys = self._fp8_weight_keys  # now a real set[str]
 
         # Pending buffer: weight_key → {"weight": Tensor|None, "scale": Tensor|None}
-        pending: dict[str, dict[str, Optional[torch.Tensor]]] = {}
+        pending: dict[str, dict[str, torch.Tensor | None]] = {}
 
-        def _try_flush(weight_key: str) -> Optional[TensorRecord]:
+        def _try_flush(weight_key: str) -> TensorRecord | None:
             slot = pending.get(weight_key)
             if slot is None:
                 return None

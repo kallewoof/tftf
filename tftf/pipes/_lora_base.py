@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from typing import Iterator, Optional
+from typing import Iterator
 
 import torch
 
 from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 from tftf.utils.lora import LoRAConfig, find_lora_keys, merge_lora
+
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class LoRAMergeBase(Pipe):
     """
 
     # Populated by subclass setup()
-    _config: Optional[LoRAConfig]
+    _config: LoRAConfig | None
     _lora_weights: dict[str, torch.Tensor]
     _adapter_key_set: set[str]
 

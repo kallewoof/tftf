@@ -7,26 +7,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from tftf.io.null_writer import NullWriter, ValidationReport
+from tftf.io.null_writer import NullWriter
 from tftf.io.reader import SafetensorsReader
 from tftf.io.sharded_reader import ShardedSafetensorsReader
 from tftf.io.sharded_writer import ShardedWriter
 from tftf.io.writer import StreamingWriter
 from tftf.pipeline import Pipeline
 from tftf.pipes._lora_base import LoRAMergeBase
-from tftf.pipes.base import CompoundPipe, Pipe, TensorMeta, TensorRecord
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 from tftf.pipes.dtype_cast import DTypeCastPipe
 from tftf.pipes.key_filter import KeyFilterPipe
 from tftf.pipes.key_rename import KeyRenamePipe
 from tftf.pipes.lora_merge import LoRAMergePipe
 from tftf.pipes.passthrough import PassthroughPipe
-from tftf.utils.lora import LoRAConfig, merge_lora
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +78,8 @@ def _make_sharded_base(tmp: Path) -> tuple[Path, dict]:
     s1 = {k: BASE[k] for k in keys[3:]}
     _save(s0, tmp / "model-00001-of-00002.safetensors")
     _save(s1, tmp / "model-00002-of-00002.safetensors")
-    wmap = {k: "model-00001-of-00002.safetensors" for k in keys[:3]}
-    wmap.update({k: "model-00002-of-00002.safetensors" for k in keys[3:]})
+    wmap = dict.fromkeys(keys[:3], "model-00001-of-00002.safetensors")
+    wmap.update(dict.fromkeys(keys[3:], "model-00002-of-00002.safetensors"))
     idx = tmp / "model.safetensors.index.json"
     idx.write_text(json.dumps({"metadata": {}, "weight_map": wmap}))
     return idx, BASE
@@ -135,7 +133,7 @@ class TestShardedWriter:
             ShardedWriter(out_dir, max_shard_bytes=3_000),
         ).run(show_progress=False)
 
-        shard_files = sorted(out_dir.glob("*.safetensors"))
+        sorted(out_dir.glob("*.safetensors"))
         # Greedy packing with 3000-byte limit on these tensors:
         #   q_proj (2048), v_proj (2048), layer1.q_proj (2048),
         #   embed (4096 > limit → own shard), norm (64 → packs with prev)

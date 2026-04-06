@@ -118,7 +118,7 @@ class Pipe(ABC):
     # Composition operator
     # ------------------------------------------------------------------
 
-    def __or__(self, other: "Pipe") -> "CompoundPipe":
+    def __or__(self, other: Pipe) -> CompoundPipe:
         """Syntax sugar: pipe_a | pipe_b  →  CompoundPipe([pipe_a, pipe_b])."""
         return CompoundPipe([self, other])
 
@@ -155,7 +155,7 @@ class CompoundPipe(Pipe):
             stream = pipe.process_meta(stream)
         return stream
 
-    def __or__(self, other: "Pipe") -> "CompoundPipe":
+    def __or__(self, other: Pipe) -> CompoundPipe:
         tail = other.pipes if isinstance(other, CompoundPipe) else [other]
         return CompoundPipe(self.pipes + tail)
 

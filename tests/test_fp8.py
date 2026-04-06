@@ -9,8 +9,8 @@ the FP8 dtype check monkey-patched, so the arithmetic runs on any PyTorch.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 import torch
@@ -23,11 +23,10 @@ from tftf.io.sharded_reader import ShardedSafetensorsReader
 from tftf.io.sharded_writer import ShardedWriter
 from tftf.io.writer import StreamingWriter
 from tftf.pipeline import Pipeline
-from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.pipes.base import TensorMeta, TensorRecord
 from tftf.pipes.dtype_cast import DTypeCastPipe
-from tftf.pipes.fp8_dequant import FP8DequantPipe, _NOT_SCANNED
+from tftf.pipes.fp8_dequant import _NOT_SCANNED, FP8DequantPipe
 from tftf.pipes.lora_merge import LoRAMergePipe
-from tftf.pipes.passthrough import PassthroughPipe
 from tftf.utils.fp8 import (
     HAS_FP8,
     dequantize_fp8_weight,
@@ -37,6 +36,7 @@ from tftf.utils.fp8 import (
     scale_key_for,
     weight_key_for_scale,
 )
+
 
 # ---------------------------------------------------------------------------
 # Guards
@@ -648,10 +648,3 @@ class TestCLI:
         for expected in ("dtype", "lora_adapter", "dry_run", "sharded",
                          "max_shard_size", "block_size", "device"):
             assert expected in params, f"Missing option: {expected}"
-
-
-# ---------------------------------------------------------------------------
-# nullcontext shim for Python < 3.10 (contextlib.nullcontext exists in 3.7+
-# but we import it here to be explicit)
-# ---------------------------------------------------------------------------
-from contextlib import nullcontext

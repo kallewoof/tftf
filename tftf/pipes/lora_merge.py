@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from safetensors import safe_open
 
 from tftf.pipes._lora_base import LoRAMergeBase
 from tftf.utils.lora import LoRAConfig
+
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class LoRAMergePipe(LoRAMergeBase):
     def __init__(
         self,
         adapter_path: Path | str,
-        config_path: Optional[Path | str] = None,
+        config_path: Path | str | None = None,
         adapter_name: str = "default",
         scale: float = 1.0,
         device: str = "cpu",
@@ -65,7 +65,7 @@ class LoRAMergePipe(LoRAMergeBase):
         )
 
         if config_path is not None:
-            self._config_path: Optional[Path] = Path(config_path)
+            self._config_path: Path | None = Path(config_path)
         else:
             candidate = self.adapter_path.parent / "adapter_config.json"
             self._config_path = candidate if candidate.exists() else None

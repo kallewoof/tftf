@@ -48,10 +48,9 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import torch
-import torch.nn.functional as F
+
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +75,7 @@ class LoRAConfig:
         return self.lora_alpha / self.r
 
     @classmethod
-    def from_file(cls, path: Path) -> "LoRAConfig":
+    def from_file(cls, path: Path) -> LoRAConfig:
         with open(path) as f:
             cfg = json.load(f)
         return cls(
@@ -86,7 +85,7 @@ class LoRAConfig:
         )
 
     @classmethod
-    def default(cls) -> "LoRAConfig":
+    def default(cls) -> LoRAConfig:
         return cls()
 
 
@@ -120,7 +119,7 @@ def find_lora_keys(
     base_key: str,
     adapter_key_set: set[str],
     adapter_name: str = "default",
-) -> Optional[tuple[str, str, bool]]:
+) -> tuple[str, str, bool] | None:
     """
     Search *adapter_key_set* for the lora_A and lora_B tensors that correspond
     to *base_key*.

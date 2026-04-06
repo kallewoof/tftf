@@ -44,6 +44,7 @@ from typing import Iterator
 
 from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 
+
 logger = logging.getLogger(__name__)
 
 # A rename rule: (compiled_pattern, replacement_string)

@@ -42,11 +42,11 @@ import json
 import logging
 import struct
 from pathlib import Path
-from typing import Optional
 
 import torch
 
 from tftf.pipes.base import TensorMeta, TensorRecord
+
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ class StreamingWriter:
     def prepare(
         self,
         metas: list[TensorMeta],
-        file_metadata: Optional[dict[str, str]] = None,
+        file_metadata: dict[str, str] | None = None,
     ) -> None:
         """
         Encode the safetensors header and write it to the output file.

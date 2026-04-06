@@ -49,6 +49,7 @@ from typing import Iterator
 
 from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 
+
 logger = logging.getLogger(__name__)
 
 
