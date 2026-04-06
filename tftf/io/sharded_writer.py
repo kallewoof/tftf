@@ -54,6 +54,7 @@ import json
 import logging
 import struct
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -109,7 +110,7 @@ class ShardedWriter(StreamingWriter):
     def prepare(
         self,
         metas: list[TensorMeta],
-        file_metadata: dict[str, str] | None = None,
+        file_metadata: Optional[dict[str, str]] = None,
     ) -> None:
         """
         Assign tensors to shards, write all shard headers, write index.json.
@@ -255,7 +256,7 @@ class ShardedWriter(StreamingWriter):
     def _write_shard_header(
         metas: list[TensorMeta],
         path: Path,
-        file_metadata: dict[str, str] | None,
+        file_metadata: Optional[dict[str, str]],
     ) -> None:
         """Encode and write the safetensors header for one shard."""
         offset = 0

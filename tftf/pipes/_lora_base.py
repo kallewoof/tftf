@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from typing import Iterator
+from typing import Iterator, Optional
 
 import torch
 
@@ -39,7 +39,7 @@ class LoRAMergeBase(Pipe):
     """
 
     # Populated by subclass setup()
-    _config: LoRAConfig | None
+    _config: Optional[LoRAConfig]
     _lora_weights: dict[str, torch.Tensor]
     _adapter_key_set: set[str]
 

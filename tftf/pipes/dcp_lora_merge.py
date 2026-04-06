@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 from tftf.pipes._lora_base import LoRAMergeBase
 from tftf.utils.dcp import load_dcp_state_dict
@@ -64,7 +65,7 @@ class DCPLoRAMergePipe(LoRAMergeBase):
     def __init__(
         self,
         checkpoint_dir: Path | str,
-        config_path: Path | str | None = None,
+        config_path: Optional[Path | str] = None,
         adapter_name: str = "default",
         scale: float = 1.0,
         device: str = "cpu",
@@ -73,7 +74,7 @@ class DCPLoRAMergePipe(LoRAMergeBase):
         self.checkpoint_dir = Path(checkpoint_dir)
 
         if config_path is not None:
-            self._config_path: Path | None = Path(config_path)
+            self._config_path: Optional[Path] = Path(config_path)
         else:
             # Common layout: adapter_config.json sits one level above the
             # pytorch_model_fsdp_0/ directory.

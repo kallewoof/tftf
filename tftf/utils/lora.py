@@ -48,6 +48,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -119,7 +120,7 @@ def find_lora_keys(
     base_key: str,
     adapter_key_set: set[str],
     adapter_name: str = "default",
-) -> tuple[str, str, bool] | None:
+) -> Optional[tuple[str, str, bool]]:
     """
     Search *adapter_key_set* for the lora_A and lora_B tensors that correspond
     to *base_key*.
