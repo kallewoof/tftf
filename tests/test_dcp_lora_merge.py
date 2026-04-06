@@ -1,4 +1,4 @@
-"""Tests for DCPLoRAMergePipe — PyTorch DCP checkpoint LoRA merging."""
+"""Tests for DCPLoRAMergePipe — PyTorch DCP checkpoint LoRA and DoRA merging."""
 
 from __future__ import annotations
 
@@ -78,6 +78,60 @@ def _make_dcp_lora(
     if target_modules is not None:
         cfg = {"r": rank, "lora_alpha": alpha, "target_modules": target_modules}
         (tmp / "adapter_config.json").write_text(json.dumps(cfg))
+
+    return dcp_dir
+
+
+def _make_dcp_dora(
+    tmp: Path,
+    base_tensors: dict[str, torch.Tensor],
+    rank: int = 4,
+    alpha: float = 8.0,
+    zero_b: bool = True,
+    target_modules: list[str] | None = None,
+    adapter_name: str = "default",
+) -> Path:
+    """
+    Save a synthetic DoRA adapter as a PyTorch DCP checkpoint.
+
+    Magnitude vectors are initialised from *base_tensors* (row-wise L2 norms
+    of W + scale·B@A) so that when lora_B is zero the merge is identity.
+    """
+    import torch.distributed.checkpoint as dist_cp
+
+    prefix = "base_model.model.model.layers.0.self_attn"
+    out, in_ = 64, 32
+
+    lora_a_q = torch.randn(rank, in_) * 0.01
+    lora_b_q = torch.zeros(out, rank) if zero_b else torch.ones(out, rank) * 0.1
+    lora_a_v = torch.randn(rank, in_) * 0.01
+    lora_b_v = torch.zeros(out, rank) if zero_b else torch.ones(out, rank) * 0.1
+
+    scale = alpha / rank
+    mag_q = (base_tensors["model.layers.0.self_attn.q_proj.weight"] + scale * lora_b_q @ lora_a_q).norm(p=2, dim=1)
+    mag_v = (base_tensors["model.layers.0.self_attn.v_proj.weight"] + scale * lora_b_v @ lora_a_v).norm(p=2, dim=1)
+
+    dora_tensors = {
+        f"{prefix}.q_proj.lora_A.{adapter_name}.weight": lora_a_q,
+        f"{prefix}.q_proj.lora_B.{adapter_name}.weight": lora_b_q,
+        f"{prefix}.q_proj.lora_magnitude_vector.{adapter_name}.weight": mag_q,
+        f"{prefix}.v_proj.lora_A.{adapter_name}.weight": lora_a_v,
+        f"{prefix}.v_proj.lora_B.{adapter_name}.weight": lora_b_v,
+        f"{prefix}.v_proj.lora_magnitude_vector.{adapter_name}.weight": mag_v,
+    }
+
+    dcp_dir = tmp / "pytorch_model_fsdp_0"
+    dcp_dir.mkdir(exist_ok=True)
+    dist_cp.save(
+        state_dict={"model": dora_tensors},
+        storage_writer=dist_cp.FileSystemWriter(dcp_dir),
+        no_dist=True,
+    )
+
+    cfg: dict = {"r": rank, "lora_alpha": alpha}
+    if target_modules is not None:
+        cfg["target_modules"] = target_modules
+    (tmp / "adapter_config.json").write_text(json.dumps(cfg))
 
     return dcp_dir
 
@@ -218,3 +272,174 @@ class TestDCPLoRAMergePipe:
         r = repr(pipe)
         assert "DCPLoRAMergePipe" in r
         assert "pytorch_model_fsdp_0" in r
+
+
+# ---------------------------------------------------------------------------
+# DoRA via DCP
+# ---------------------------------------------------------------------------
+
+
+class TestDCPDoRAMergePipe:
+    """DoRA magnitude vectors stored inside a DCP checkpoint are merged correctly."""
+
+    def test_magnitude_keys_loaded_into_adapter_key_set(self, tmp_path):
+        """After setup(), _adapter_key_set must include the magnitude vector keys."""
+        from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+
+        _, base_tensors = _make_base_single(tmp_path)
+        dcp_dir = _make_dcp_dora(tmp_path, base_tensors)
+
+        pipe = DCPLoRAMergePipe(checkpoint_dir=dcp_dir)
+        pipe.setup()
+        mag_keys = [k for k in pipe._adapter_key_set if "lora_magnitude_vector" in k]
+        assert len(mag_keys) == 2, f"Expected 2 magnitude keys, got: {mag_keys}"
+        pipe.teardown()
+
+    def test_zero_b_is_identity(self, tmp_path):
+        """DoRA with zero lora_B and magnitude = ||W||_r must leave weights unchanged."""
+        from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+
+        base_path, base_tensors = _make_base_single(tmp_path)
+        dcp_dir = _make_dcp_dora(tmp_path, base_tensors, zero_b=True)
+        out = tmp_path / "merged.safetensors"
+
+        Pipeline(
+            SafetensorsReader(base_path),
+            DCPLoRAMergePipe(checkpoint_dir=dcp_dir),
+            StreamingWriter(out),
+        ).run(show_progress=False)
+
+        result = _load(out)
+        for k in ("model.layers.0.self_attn.q_proj.weight",
+                  "model.layers.0.self_attn.v_proj.weight"):
+            assert torch.allclose(result[k], base_tensors[k], atol=1e-4), \
+                f"{k}: zero lora_B DoRA via DCP should be near-identity"
+
+    def test_nonzero_b_changes_weight(self, tmp_path):
+        """Non-zero lora_B must produce DoRA-merged weights that differ from base."""
+        from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+
+        base_path, base_tensors = _make_base_single(tmp_path)
+        dcp_dir = _make_dcp_dora(tmp_path, base_tensors, zero_b=False)
+        out = tmp_path / "merged.safetensors"
+
+        Pipeline(
+            SafetensorsReader(base_path),
+            DCPLoRAMergePipe(checkpoint_dir=dcp_dir),
+            StreamingWriter(out),
+        ).run(show_progress=False)
+
+        result = _load(out)
+        assert not torch.allclose(
+            result["model.layers.0.self_attn.q_proj.weight"],
+            base_tensors["model.layers.0.self_attn.q_proj.weight"],
+        ), "q_proj should have changed with non-zero lora_B"
+
+    def test_non_dora_keys_unchanged(self, tmp_path):
+        """Keys with no LoRA/DoRA entry in the DCP must pass through unchanged."""
+        from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+
+        base_path, base_tensors = _make_base_single(tmp_path)
+        dcp_dir = _make_dcp_dora(tmp_path, base_tensors, zero_b=False)
+        out = tmp_path / "merged.safetensors"
+
+        Pipeline(
+            SafetensorsReader(base_path),
+            DCPLoRAMergePipe(checkpoint_dir=dcp_dir),
+            StreamingWriter(out),
+        ).run(show_progress=False)
+
+        result = _load(out)
+        assert torch.allclose(result["model.norm.weight"], base_tensors["model.norm.weight"])
+        assert torch.allclose(result["model.embed_tokens.weight"], base_tensors["model.embed_tokens.weight"])
+
+    def test_target_modules_respected(self, tmp_path):
+        """target_modules restricts DoRA merging to listed modules."""
+        from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+
+        base_path, base_tensors = _make_base_single(tmp_path)
+        dcp_dir = _make_dcp_dora(tmp_path, base_tensors, zero_b=False, target_modules=["q_proj"])
+        out = tmp_path / "merged.safetensors"
+
+        Pipeline(
+            SafetensorsReader(base_path),
+            DCPLoRAMergePipe(checkpoint_dir=dcp_dir),
+            StreamingWriter(out),
+        ).run(show_progress=False)
+
+        result = _load(out)
+        assert not torch.allclose(
+            result["model.layers.0.self_attn.q_proj.weight"],
+            base_tensors["model.layers.0.self_attn.q_proj.weight"],
+        ), "q_proj (in target_modules) should be merged"
+        assert torch.allclose(
+            result["model.layers.0.self_attn.v_proj.weight"],
+            base_tensors["model.layers.0.self_attn.v_proj.weight"],
+        ), "v_proj (not in target_modules) should be unchanged"
+
+    def test_result_differs_from_plain_lora(self, tmp_path):
+        """DoRA output must differ from the equivalent plain-LoRA merge."""
+        from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+
+        base_path, base_tensors = _make_base_single(tmp_path)
+
+        # Build a DCP with non-zero lora_B and a magnitude ≠ ||W||_r
+        # (scale magnitude by 2 so it can't accidentally equal the LoRA result)
+        import torch.distributed.checkpoint as dist_cp
+
+        prefix = "base_model.model.model.layers.0.self_attn"
+        rank, alpha = 4, 8.0
+        scale = alpha / rank
+        lora_a = torch.randn(rank, 32) * 0.01
+        lora_b = torch.ones(64, rank) * 0.1
+
+        q_weight = base_tensors["model.layers.0.self_attn.q_proj.weight"]
+        mag_q = (q_weight + scale * lora_b @ lora_a).norm(p=2, dim=1) * 2.0  # doubled
+
+        tensors = {
+            f"{prefix}.q_proj.lora_A.default.weight": lora_a,
+            f"{prefix}.q_proj.lora_B.default.weight": lora_b,
+            f"{prefix}.q_proj.lora_magnitude_vector.default.weight": mag_q,
+        }
+        dcp_dir = tmp_path / "pytorch_model_fsdp_0"
+        dcp_dir.mkdir()
+        dist_cp.save(
+            state_dict={"model": tensors},
+            storage_writer=dist_cp.FileSystemWriter(dcp_dir),
+            no_dist=True,
+        )
+        (tmp_path / "adapter_config.json").write_text(
+            json.dumps({"r": rank, "lora_alpha": alpha})
+        )
+
+        # Plain-LoRA checkpoint (same A/B, no magnitude)
+        lora_only_tensors = {
+            f"{prefix}.q_proj.lora_A.default.weight": lora_a,
+            f"{prefix}.q_proj.lora_B.default.weight": lora_b,
+        }
+        dcp_dir_plain = tmp_path / "pytorch_model_fsdp_plain"
+        dcp_dir_plain.mkdir()
+        dist_cp.save(
+            state_dict={"model": lora_only_tensors},
+            storage_writer=dist_cp.FileSystemWriter(dcp_dir_plain),
+            no_dist=True,
+        )
+        config_path = tmp_path / "adapter_config.json"
+
+        out_dora = tmp_path / "out_dora.safetensors"
+        out_lora = tmp_path / "out_lora.safetensors"
+
+        Pipeline(SafetensorsReader(base_path),
+                 DCPLoRAMergePipe(dcp_dir, config_path=config_path),
+                 StreamingWriter(out_dora)).run(show_progress=False)
+
+        Pipeline(SafetensorsReader(base_path),
+                 DCPLoRAMergePipe(dcp_dir_plain, config_path=config_path),
+                 StreamingWriter(out_lora)).run(show_progress=False)
+
+        r_dora = _load(out_dora)
+        r_lora = _load(out_lora)
+        assert not torch.allclose(
+            r_dora["model.layers.0.self_attn.q_proj.weight"],
+            r_lora["model.layers.0.self_attn.q_proj.weight"],
+        ), "DoRA and LoRA merges should produce different results"
