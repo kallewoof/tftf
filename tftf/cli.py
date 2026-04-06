@@ -290,6 +290,7 @@ class _Arg:
     choices: list[str] | None = None
     multiple: bool = False                 # accumulate repeated occurrences into a list
     nargs: int = 1                         # values consumed per occurrence
+    positional: bool = False               # accept bare value(s) without the flag name
 
     @property
     def dest(self) -> str:
@@ -309,10 +310,17 @@ class _PipeSpec:
 
 # -- per-pipe factory functions -----------------------------------------------
 
+_FP8_DTYPE_MAP: dict[str, torch.dtype] = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "fp32": torch.float32,
+}
+
+
 def _make_dequant_fp8_pipe(ns: dict[str, Any]) -> Any:
     from tftf.pipes.fp8_dequant import FP8DequantPipe
     return FP8DequantPipe(
-        target_dtype=_DTYPE_CHOICES[ns["dtype"]],
+        target_dtype=_FP8_DTYPE_MAP[ns["dtype"]],
         block_size=ns["block_size"],
         device=ns["device"],
     )
@@ -346,7 +354,8 @@ _PIPE_REGISTRY: dict[str, _PipeSpec] = {
         activator="--dequant-fp8",
         help="Dequantise fine-grained FP8 weights.",
         args=[
-            _Arg("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16"),
+            _Arg("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16",
+                 positional=True),
             _Arg("--block-size", type=int, default=128),
             _Arg("--device", default="cpu"),
         ],
@@ -356,7 +365,7 @@ _PIPE_REGISTRY: dict[str, _PipeSpec] = {
         activator="--merge-lora",
         help="Fuse a LoRA adapter (regular or DCP/FSDP, auto-detected).",
         args=[
-            _Arg("--adapter", type=Path, required=True),
+            _Arg("--adapter", type=Path, required=True, positional=True),
             _Arg("--adapter-config", type=Path),
             _Arg("--adapter-name", default="default"),
             _Arg("--scale", type=float, default=1.0),
@@ -368,7 +377,7 @@ _PIPE_REGISTRY: dict[str, _PipeSpec] = {
         activator="--key-filter",
         help="Include or exclude tensors by glob pattern.",
         args=[
-            _Arg("--include", multiple=True),
+            _Arg("--include", multiple=True, positional=True),
             _Arg("--exclude", multiple=True),
         ],
         factory=lambda ns: KeyFilterPipe(
@@ -379,7 +388,7 @@ _PIPE_REGISTRY: dict[str, _PipeSpec] = {
         activator="--key-rename",
         help="Rename tensor keys via regex substitution (--rule PATTERN REPLACEMENT).",
         args=[
-            _Arg("--rule", nargs=2, multiple=True),
+            _Arg("--rule", nargs=2, multiple=True, positional=True),
         ],
         factory=lambda ns: KeyRenamePipe(list(ns["rule"])),
     ),
@@ -387,7 +396,8 @@ _PIPE_REGISTRY: dict[str, _PipeSpec] = {
         activator="--dtype-cast",
         help="Cast all tensors to the specified dtype.",
         args=[
-            _Arg("--dtype", required=True, choices=list(_DTYPE_CHOICES)),
+            _Arg("--dtype", required=True, choices=list(_DTYPE_CHOICES),
+                 positional=True),
         ],
         factory=lambda ns: DTypeCastPipe(_DTYPE_CHOICES[ns["dtype"]]),
     ),
@@ -399,42 +409,58 @@ _PIPE_REGISTRY: dict[str, _PipeSpec] = {
 def _parse_section(spec: _PipeSpec, tokens: list[str]) -> Any:
     """Parse one pipe section's tokens and return an instantiated Pipe."""
     arg_map: dict[str, _Arg] = {a.flag: a for a in spec.args}
+    positional: _Arg | None = next((a for a in spec.args if a.positional), None)
     namespace: dict[str, Any] = {
         a.dest: ([] if a.multiple else a.default) for a in spec.args
     }
 
     i = 0
     while i < len(tokens):
-        flag = tokens[i]
-        if flag not in arg_map:
-            valid = ", ".join(a.flag for a in spec.args) or "(none)"
-            raise click.UsageError(
-                f"Unknown option {flag!r} for {spec.activator}. "
-                f"Valid options: {valid}."
-            )
-        arg = arg_map[flag]
+        token = tokens[i]
+
+        if token.startswith("--"):
+            # Named flag — advance past the flag name, then consume values below.
+            if token not in arg_map:
+                valid = ", ".join(a.flag for a in spec.args) or "(none)"
+                raise click.UsageError(
+                    f"Unknown option {token!r} for {spec.activator}. "
+                    f"Valid options: {valid}."
+                )
+            arg = arg_map[token]
+            i += 1  # move past the flag
+        else:
+            # Bare value — route to the positional arg; i already points at value.
+            if positional is None:
+                raise click.UsageError(
+                    f"Unexpected positional value {token!r} for {spec.activator}. "
+                    f"All arguments require a flag name."
+                )
+            arg = positional
+
+        # Consume nargs values starting at i.
         values: list[str] = []
         for _ in range(arg.nargs):
-            i += 1
             if i >= len(tokens) or tokens[i].startswith("--"):
+                label = arg.flag if token.startswith("--") else "positional"
                 raise click.UsageError(
-                    f"{spec.activator} {flag} requires {arg.nargs} value(s)."
+                    f"{spec.activator} {label} requires {arg.nargs} value(s)."
                 )
             values.append(tokens[i])
+            i += 1
 
         converted: Any = (
             tuple(arg.type(v) for v in values) if arg.nargs > 1
             else arg.type(values[0])
         )
         if arg.choices and converted not in arg.choices:
+            label = arg.flag if token.startswith("--") else "positional"
             raise click.UsageError(
-                f"{flag}: {converted!r} is not one of {arg.choices}."
+                f"{label}: {converted!r} is not one of {arg.choices}."
             )
         if arg.multiple:
             namespace[arg.dest].append(converted)
         else:
             namespace[arg.dest] = converted
-        i += 1
 
     for arg in spec.args:
         if arg.required and namespace[arg.dest] is None:

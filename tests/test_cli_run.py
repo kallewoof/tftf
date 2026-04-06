@@ -148,6 +148,46 @@ class TestPipeChainParser:
         ))
         assert isinstance(pipe, CompoundPipe)
 
+    # -- positional (anonymous) argument tests --------------------------------
+
+    def test_dtype_cast_positional(self):
+        pipe = self.parse(("--dtype-cast", "bfloat16"))
+        assert isinstance(pipe, DTypeCastPipe)
+
+    def test_dequant_fp8_positional_dtype(self):
+        from tftf.pipes.fp8_dequant import FP8DequantPipe
+        pipe = self.parse(("--dequant-fp8", "fp16"))
+        assert isinstance(pipe, FP8DequantPipe)
+
+    def test_dequant_fp8_positional_then_named(self):
+        from tftf.pipes.fp8_dequant import FP8DequantPipe
+        pipe = self.parse(("--dequant-fp8", "fp16", "--block-size", "64"))
+        assert isinstance(pipe, FP8DequantPipe)
+
+    def test_key_rename_positional_single_rule(self):
+        pipe = self.parse(("--key-rename", "^foo", "bar"))
+        assert isinstance(pipe, KeyRenamePipe)
+
+    def test_key_rename_positional_multiple_rules(self):
+        pipe = self.parse(("--key-rename", "^foo", "bar", "^baz", "qux"))
+        assert isinstance(pipe, KeyRenamePipe)
+
+    def test_key_filter_positional_include(self):
+        pipe = self.parse(("--key-filter", "*q_proj*", "*v_proj*"))
+        assert isinstance(pipe, KeyFilterPipe)
+
+    def test_positional_invalid_choice_raises(self):
+        with pytest.raises(click.UsageError, match="not one of"):
+            self.parse(("--dtype-cast", "not_a_dtype"))
+
+    def test_no_positional_for_pipe_raises(self):
+        # --key-filter's positional is --include; passing a bare value after
+        # exhausting positional slots still works (multiple), but a pipe with
+        # no positional should reject bare values.  --dtype-cast has only one
+        # positional slot (non-multiple), so a second bare value is an error.
+        with pytest.raises(click.UsageError):
+            self.parse(("--dtype-cast", "bfloat16", "extra"))
+
 
 import click  # noqa: E402  (used in test bodies above via pytest.raises)
 
@@ -218,6 +258,27 @@ class TestRunCommand:
                         "--dtype-cast", "--dtype", "bfloat16", "--dry-run"])
         assert code == 0
         assert not out.exists()
+
+    def test_positional_adapter_path(self, tmp_path):
+        """--merge-lora /path is equivalent to --merge-lora --adapter /path."""
+        base = _make_base(tmp_path / "base")
+        adapter = _make_lora_adapter(tmp_path / "adapter")
+        out = tmp_path / "out"
+        code, msg = _run(["run", "-i", str(base), "-o", str(out),
+                          "--merge-lora", str(adapter)])
+        assert code == 0, msg
+        result = _load_output(out)
+        assert set(result.keys()) == set(_BASE_TENSORS.keys())
+
+    def test_positional_dtype_cast(self, tmp_path):
+        """--dtype-cast bf16 is equivalent to --dtype-cast --dtype bf16."""
+        base = _make_base(tmp_path / "base")
+        out = tmp_path / "out"
+        code, msg = _run(["run", "-i", str(base), "-o", str(out),
+                          "--dtype-cast", "bfloat16"])
+        assert code == 0, msg
+        result = _load_output(out)
+        assert all(t.dtype == torch.bfloat16 for t in result.values())
 
     def test_unknown_pipe_flag_exits_nonzero(self, tmp_path):
         base = _make_base(tmp_path / "base")
