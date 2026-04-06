@@ -542,3 +542,139 @@ class TestResolveDcpCheckpoint:
 
         with pytest.raises(click.BadParameter, match="No DCP directory"):
             self.resolve(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# merge-lora auto-detection (_resolve_adapter + merge-lora command)
+# ---------------------------------------------------------------------------
+
+
+def _make_regular_lora_checkpoint(tmp: Path, steps: list[int], rank: int = 4, alpha: float = 8.0) -> Path:
+    """
+    Create a training output directory with regular LoRA safetensors checkpoints.
+    """
+    lora_tensors = {
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight": torch.ones(rank, 32),
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight": torch.ones(64, rank),
+    }
+    cfg = {"r": rank, "lora_alpha": alpha, "target_modules": ["q_proj"]}
+    (tmp / "adapter_config.json").write_text(json.dumps(cfg))
+    for step in steps:
+        ckpt = tmp / f"checkpoint-{step}"
+        ckpt.mkdir()
+        save_file(lora_tensors, str(ckpt / "adapter_model.safetensors"))
+    return tmp
+
+
+class TestResolveAdapter:
+    """Unit tests for tftf.cli._resolve_adapter."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from tftf.cli import _resolve_adapter
+        self.resolve = _resolve_adapter
+
+    def test_passthrough_plain_lora_file(self, tmp_path):
+        """A .safetensors file is returned as-is with kind='lora'."""
+        f = tmp_path / "adapter_model.safetensors"
+        save_file({"x": torch.zeros(1)}, str(f))
+        path, kind, hint = self.resolve(f)
+        assert path == f
+        assert kind == "lora"
+        assert hint is None
+
+    def test_passthrough_dcp_dir(self, tmp_path):
+        """A directory with .metadata is returned as-is with kind='dcp'."""
+        import torch.distributed.checkpoint as dist_cp
+        dcp = tmp_path / "pytorch_model_fsdp_0"
+        dcp.mkdir()
+        dist_cp.save({"x": torch.zeros(1)}, storage_writer=dist_cp.FileSystemWriter(dcp), no_dist=True)
+        path, kind, hint = self.resolve(dcp)
+        assert path == dcp
+        assert kind == "dcp"
+        assert hint is None
+
+    def test_training_dir_with_dcp_resolves_to_dcp(self, tmp_path):
+        """Training dir containing DCP checkpoints → kind='dcp', correct subdir."""
+        training_dir = _make_training_dir(tmp_path, [30, 111])
+        path, kind, hint = self.resolve(training_dir)
+        assert kind == "dcp"
+        assert (path / ".metadata").exists()
+        assert path.parent.name == "checkpoint-111"
+
+    def test_training_dir_with_dcp_returns_config_hint(self, tmp_path):
+        """config_hint points to adapter_config.json at training dir level."""
+        training_dir = _make_training_dir(tmp_path, [60])
+        _, _, hint = self.resolve(training_dir)
+        assert hint == training_dir / "adapter_config.json"
+
+    def test_training_dir_no_config_hint_is_none(self, tmp_path):
+        """If adapter_config.json is absent from training dir, hint is None."""
+        training_dir = _make_training_dir(tmp_path, [60])
+        (training_dir / "adapter_config.json").unlink()
+        _, _, hint = self.resolve(training_dir)
+        assert hint is None
+
+    def test_training_dir_with_regular_lora(self, tmp_path):
+        """Training dir with adapter_model.safetensors checkpoints → kind='lora'."""
+        training_dir = _make_regular_lora_checkpoint(tmp_path, [30, 60, 90])
+        path, kind, hint = self.resolve(training_dir)
+        assert kind == "lora"
+        assert (path / "adapter_model.safetensors").exists()
+        assert path.name == "checkpoint-90"
+
+    def test_training_dir_bad_content_raises(self, tmp_path):
+        """Training dir whose latest checkpoint has neither DCP nor safetensors raises."""
+        import click
+        (tmp_path / "adapter_config.json").write_text("{}")
+        (tmp_path / "checkpoint-1").mkdir()
+        with pytest.raises(click.BadParameter, match="does not appear to be a training directory"):
+            self.resolve(tmp_path)
+
+
+class TestMergeLoraCLIAutoDetect:
+    """Integration tests: merge-lora command routes to the correct pipe automatically."""
+
+    def _run_merge(self, base_path: Path, adapter_path: Path, out_path: Path) -> None:
+        from click.testing import CliRunner
+
+        from tftf.cli import cli
+        result = CliRunner().invoke(cli, [
+            "merge-lora",
+            "-b", str(base_path),
+            "-a", str(adapter_path),
+            "-o", str(out_path),
+        ])
+        if result.exit_code != 0:
+            raise AssertionError(result.output + (str(result.exception) if result.exception else ""))
+
+    def test_training_dir_dcp_merges_correctly(self, tmp_path):
+        """merge-lora accepts a DCP training dir and produces a merged model."""
+        (tmp_path / "base").mkdir()
+        base_path, base_tensors = _make_base_single(tmp_path / "base")
+        training_dir = tmp_path / "training"
+        training_dir.mkdir()
+        _make_training_dir(training_dir, [60])
+
+        out = tmp_path / "merged.safetensors"
+        self._run_merge(base_path, training_dir, out)
+        result = load_file(str(out))
+        assert set(result.keys()) == set(base_tensors.keys())
+
+    def test_training_dir_regular_lora_merges_correctly(self, tmp_path):
+        """merge-lora accepts a regular-LoRA training dir and produces a merged model."""
+        (tmp_path / "base").mkdir()
+        base_path, base_tensors = _make_base_single(tmp_path / "base")
+        training_dir = tmp_path / "training"
+        training_dir.mkdir()
+        _make_regular_lora_checkpoint(training_dir, [30, 90])
+
+        out = tmp_path / "merged.safetensors"
+        self._run_merge(base_path, training_dir, out)
+        result = load_file(str(out))
+        assert set(result.keys()) == set(base_tensors.keys())
+        # lora_B is all-ones so q_proj must differ from base
+        assert not torch.allclose(
+            result["model.layers.0.self_attn.q_proj.weight"],
+            base_tensors["model.layers.0.self_attn.q_proj.weight"],
+        )

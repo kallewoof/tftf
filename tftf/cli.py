@@ -72,6 +72,71 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+def _resolve_adapter(path: Path) -> tuple[Path, str, Path | None]:
+    """
+    Resolve an adapter path to a concrete location and detect its type.
+
+    Returns ``(resolved_path, kind, config_hint)`` where *kind* is ``"dcp"``
+    or ``"lora"`` and *config_hint* is an ``adapter_config.json`` path found
+    during resolution (or ``None`` if the pipes should do their own
+    auto-detection).
+
+    Resolution rules
+    ----------------
+    1. Path contains ``.metadata`` → already a DCP checkpoint dir.
+    2. Path contains ``checkpoint-<N>`` subdirectories → training output dir;
+       pick the latest checkpoint, then look inside for a DCP subdir or
+       ``adapter_model.safetensors``.  ``adapter_config.json`` at the training
+       dir level is returned as *config_hint* so callers can pass it explicitly
+       (the DCP pipe's own auto-detection would look one level too low).
+    3. Otherwise → treat as a regular LoRA path and let the pipe handle it.
+    """
+    import re
+
+    # Plain file (e.g. adapter_model.safetensors passed directly).
+    if not path.is_dir():
+        return path, "lora", None
+
+    # Already a DCP shard directory.
+    if (path / ".metadata").exists():
+        return path, "dcp", None
+
+    checkpoint_dirs = [
+        d for d in path.iterdir()
+        if d.is_dir() and re.fullmatch(r"checkpoint-\d+", d.name)
+    ]
+    if not checkpoint_dirs:
+        return path, "lora", None
+
+    latest = max(checkpoint_dirs, key=lambda d: int(d.name.split("-")[1]))
+    click.echo(
+        f"Training directory detected — using latest checkpoint: {latest.name}",
+        err=True,
+    )
+
+    # adapter_config.json lives at the training dir level, not inside the checkpoint.
+    config_hint: Path | None = path / "adapter_config.json"
+    if not config_hint.exists():
+        config_hint = None
+
+    # DCP subdir wins if present.
+    dcp_subdirs = [d for d in latest.iterdir() if d.is_dir() and (d / ".metadata").exists()]
+    if dcp_subdirs:
+        dcp_dir = dcp_subdirs[0]
+        if len(dcp_subdirs) > 1:
+            click.echo(f"Multiple DCP subdirectories found; using {dcp_dir.name}", err=True)
+        return dcp_dir, "dcp", config_hint
+
+    # Regular LoRA checkpoint.
+    if (latest / "adapter_model.safetensors").exists():
+        return latest, "lora", config_hint
+
+    raise click.BadParameter(
+        f"{path} does not appear to be a training directory with mergeable adapters.",
+        param_hint="-a / --adapter",
+    )
+
+
 def _resolve_dcp_checkpoint(path: Path) -> Path:
     """
     If *path* looks like a training output directory, locate the latest
@@ -352,7 +417,7 @@ def passthrough(
               help="Base model (file, directory, or index.json).")
 @click.option("-a", "--adapter", "adapter_path", required=True,
               type=click.Path(exists=True, dir_okay=True, path_type=Path),
-              help="LoRA adapter_model.safetensors or dir containing it.")
+              help="LoRA adapter_model.safetensors, adapter dir, or training output directory.")
 @click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
               help="Output path.")
 @click.option("--adapter-config", type=click.Path(dir_okay=False, path_type=Path), default=None,
@@ -392,10 +457,20 @@ def merge_lora(
     One base weight tensor is in RAM at a time.  The full LoRA adapter is kept
     in RAM (typically 30-100 MiB).  Supports sharded base models.
 
+    -a accepts a single adapter_model.safetensors file, a directory containing
+    one, a DCP checkpoint directory, or a training output directory.  Training
+    directories are auto-detected: the latest checkpoint-<N> subfolder is used
+    and the adapter format (regular LoRA or DCP/FSDP) is determined automatically.
+
     \b
     Examples:
         tftf merge-lora \\
             -b ./llama-7b/ -a ./my-lora/adapter_model.safetensors \\
+            -o ./merged.safetensors --dtype bfloat16
+
+        # Pass a training output directory — format auto-detected
+        tftf merge-lora \\
+            -b ./llama-7b/ -a ./training-output/ \\
             -o ./merged.safetensors --dtype bfloat16
 
         # Validate merge without writing
@@ -411,16 +486,29 @@ def merge_lora(
     """
     _setup_logging(verbose)
 
+    adapter_path, adapter_kind, config_hint = _resolve_adapter(adapter_path)
+    effective_config = adapter_config or config_hint
+
     pipe: Pipe = PassthroughPipe()
     if rename_rules:
         pipe = pipe | KeyRenamePipe(list(rename_rules))
-    pipe = pipe | LoRAMergePipe(
-        adapter_path=adapter_path,
-        config_path=adapter_config,
-        adapter_name=adapter_name,
-        scale=scale,
-        device=device,
-    )
+    if adapter_kind == "dcp":
+        click.echo("Adapter format: DCP/FSDP — using DCPLoRAMergePipe", err=True)
+        pipe = pipe | DCPLoRAMergePipe(
+            checkpoint_dir=adapter_path,
+            config_path=effective_config,
+            adapter_name=adapter_name,
+            scale=scale,
+            device=device,
+        )
+    else:
+        pipe = pipe | LoRAMergePipe(
+            adapter_path=adapter_path,
+            config_path=effective_config,
+            adapter_name=adapter_name,
+            scale=scale,
+            device=device,
+        )
     if dtype:
         pipe = pipe | DTypeCastPipe(_DTYPE_CHOICES[dtype])
 
