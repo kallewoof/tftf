@@ -22,8 +22,10 @@ from __future__ import annotations
 import logging
 import shutil
 import sys
+from dataclasses import dataclass
+from dataclasses import field as _dc_field
 from pathlib import Path
-from typing import Union
+from typing import Any, Callable, Union
 
 import click
 import torch
@@ -270,6 +272,220 @@ def _common_write_options(f):
         help="Maximum bytes per output shard.",
     )(f)
     return f
+
+
+# ---------------------------------------------------------------------------
+# Composable pipe chain — used by `tftf run`
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Arg:
+    """Descriptor for one argument accepted by a pipe in the ``tftf run`` syntax."""
+
+    flag: str                              # e.g. "--dtype"
+    type: Callable[[str], Any] = str       # value converter
+    default: Any = None
+    required: bool = False
+    choices: list[str] | None = None
+    multiple: bool = False                 # accumulate repeated occurrences into a list
+    nargs: int = 1                         # values consumed per occurrence
+
+    @property
+    def dest(self) -> str:
+        """Namespace key: ``--foo-bar`` → ``foo_bar``."""
+        return self.flag.lstrip("-").replace("-", "_")
+
+
+@dataclass
+class _PipeSpec:
+    """Registry entry for one composable pipe type."""
+
+    activator: str                                  # flag that opens this section
+    factory: Callable[[dict[str, Any]], Any]        # namespace dict → Pipe
+    args: list[_Arg] = _dc_field(default_factory=list)
+    help: str = ""
+
+
+# -- per-pipe factory functions -----------------------------------------------
+
+def _make_dequant_fp8_pipe(ns: dict[str, Any]) -> Any:
+    from tftf.pipes.fp8_dequant import FP8DequantPipe
+    return FP8DequantPipe(
+        target_dtype=_DTYPE_CHOICES[ns["dtype"]],
+        block_size=ns["block_size"],
+        device=ns["device"],
+    )
+
+
+def _make_merge_lora_pipe_from_ns(ns: dict[str, Any]) -> Any:
+    adapter_path, adapter_kind, config_hint = _resolve_adapter(ns["adapter"])
+    effective_config = ns.get("adapter_config") or config_hint
+    if adapter_kind == "dcp":
+        click.echo("Adapter format: DCP/FSDP — using DCPLoRAMergePipe", err=True)
+        return DCPLoRAMergePipe(
+            checkpoint_dir=adapter_path,
+            config_path=effective_config,
+            adapter_name=ns["adapter_name"],
+            scale=ns["scale"],
+            device=ns["device"],
+        )
+    return LoRAMergePipe(
+        adapter_path=adapter_path,
+        config_path=effective_config,
+        adapter_name=ns["adapter_name"],
+        scale=ns["scale"],
+        device=ns["device"],
+    )
+
+
+# -- registry -----------------------------------------------------------------
+
+_PIPE_REGISTRY: dict[str, _PipeSpec] = {
+    "--dequant-fp8": _PipeSpec(
+        activator="--dequant-fp8",
+        help="Dequantise fine-grained FP8 weights.",
+        args=[
+            _Arg("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16"),
+            _Arg("--block-size", type=int, default=128),
+            _Arg("--device", default="cpu"),
+        ],
+        factory=_make_dequant_fp8_pipe,
+    ),
+    "--merge-lora": _PipeSpec(
+        activator="--merge-lora",
+        help="Fuse a LoRA adapter (regular or DCP/FSDP, auto-detected).",
+        args=[
+            _Arg("--adapter", type=Path, required=True),
+            _Arg("--adapter-config", type=Path),
+            _Arg("--adapter-name", default="default"),
+            _Arg("--scale", type=float, default=1.0),
+            _Arg("--device", default="cpu"),
+        ],
+        factory=_make_merge_lora_pipe_from_ns,
+    ),
+    "--key-filter": _PipeSpec(
+        activator="--key-filter",
+        help="Include or exclude tensors by glob pattern.",
+        args=[
+            _Arg("--include", multiple=True),
+            _Arg("--exclude", multiple=True),
+        ],
+        factory=lambda ns: KeyFilterPipe(
+            include=list(ns["include"]), exclude=list(ns["exclude"])
+        ),
+    ),
+    "--key-rename": _PipeSpec(
+        activator="--key-rename",
+        help="Rename tensor keys via regex substitution (--rule PATTERN REPLACEMENT).",
+        args=[
+            _Arg("--rule", nargs=2, multiple=True),
+        ],
+        factory=lambda ns: KeyRenamePipe(list(ns["rule"])),
+    ),
+    "--dtype-cast": _PipeSpec(
+        activator="--dtype-cast",
+        help="Cast all tensors to the specified dtype.",
+        args=[
+            _Arg("--dtype", required=True, choices=list(_DTYPE_CHOICES)),
+        ],
+        factory=lambda ns: DTypeCastPipe(_DTYPE_CHOICES[ns["dtype"]]),
+    ),
+}
+
+
+# -- parser -------------------------------------------------------------------
+
+def _parse_section(spec: _PipeSpec, tokens: list[str]) -> Any:
+    """Parse one pipe section's tokens and return an instantiated Pipe."""
+    arg_map: dict[str, _Arg] = {a.flag: a for a in spec.args}
+    namespace: dict[str, Any] = {
+        a.dest: ([] if a.multiple else a.default) for a in spec.args
+    }
+
+    i = 0
+    while i < len(tokens):
+        flag = tokens[i]
+        if flag not in arg_map:
+            valid = ", ".join(a.flag for a in spec.args) or "(none)"
+            raise click.UsageError(
+                f"Unknown option {flag!r} for {spec.activator}. "
+                f"Valid options: {valid}."
+            )
+        arg = arg_map[flag]
+        values: list[str] = []
+        for _ in range(arg.nargs):
+            i += 1
+            if i >= len(tokens) or tokens[i].startswith("--"):
+                raise click.UsageError(
+                    f"{spec.activator} {flag} requires {arg.nargs} value(s)."
+                )
+            values.append(tokens[i])
+
+        converted: Any = (
+            tuple(arg.type(v) for v in values) if arg.nargs > 1
+            else arg.type(values[0])
+        )
+        if arg.choices and converted not in arg.choices:
+            raise click.UsageError(
+                f"{flag}: {converted!r} is not one of {arg.choices}."
+            )
+        if arg.multiple:
+            namespace[arg.dest].append(converted)
+        else:
+            namespace[arg.dest] = converted
+        i += 1
+
+    for arg in spec.args:
+        if arg.required and namespace[arg.dest] is None:
+            raise click.UsageError(f"{spec.activator} requires {arg.flag}.")
+
+    return spec.factory(namespace)
+
+
+def _parse_pipe_chain(tokens: tuple[str, ...]) -> Any:
+    """
+    Parse a flat token sequence into a chained Pipe.
+
+    Tokens are split at each pipe-activator flag (e.g. ``--dequant-fp8``).
+    Everything between two activators is parsed as arguments for the preceding
+    pipe.  Sections are instantiated in order and composed with ``|``.
+    An empty token sequence returns a :class:`PassthroughPipe`.
+    """
+    if not tokens:
+        return PassthroughPipe()
+
+    activators = set(_PIPE_REGISTRY)
+    sections: list[tuple[_PipeSpec, list[str]]] = []
+    current_spec: _PipeSpec | None = None
+    current_tokens: list[str] = []
+
+    for token in tokens:
+        if token in activators:
+            if current_spec is not None:
+                sections.append((current_spec, current_tokens))
+            current_spec = _PIPE_REGISTRY[token]
+            current_tokens = []
+        elif current_spec is None:
+            known = ", ".join(sorted(activators))
+            raise click.UsageError(
+                f"Unexpected token {token!r} before any pipe flag. "
+                f"Available pipes: {known}."
+            )
+        else:
+            current_tokens.append(token)
+
+    if current_spec is not None:
+        sections.append((current_spec, current_tokens))
+
+    if not sections:
+        return PassthroughPipe()
+
+    pipes = [_parse_section(spec, toks) for spec, toks in sections]
+    result = pipes[0]
+    for p in pipes[1:]:
+        result = result | p
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +1043,81 @@ def dequant_fp8(
         pipe=pipe,
         writer=writer,
     ).run(show_progress=not no_progress, progress_desc="dequant-fp8")
+    _finish_write(writer)
+    if not dry_run:
+        _copy_model_extras(_model_dir(input_path), output_path)
+
+
+# ---------------------------------------------------------------------------
+# run — composable pipeline
+# ---------------------------------------------------------------------------
+
+
+@cli.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@click.option("-i", "--input", "input_path", required=True, type=_MODEL_PATH_TYPE,
+              help="Input model (file, directory, or index.json).")
+@click.option("-o", "--output", "output_path", required=True,
+              type=click.Path(file_okay=False, path_type=Path),
+              help="Output directory (created if absent).")
+@click.option("--dry-run", is_flag=True,
+              help="Validate the full pipeline without writing any output.")
+@click.option("--max-shard-size", default=_DEFAULT_MAX_SHARD_BYTES,
+              show_default="20 GiB", type=int,
+              help="Maximum bytes per output shard.")
+@click.option("--no-progress", is_flag=True)
+@click.option("-v", "--verbose", is_flag=True)
+@click.argument("pipe_args", nargs=-1, type=click.UNPROCESSED)
+def run_pipeline(
+    input_path: Path,
+    output_path: Path,
+    dry_run: bool,
+    max_shard_size: int,
+    no_progress: bool,
+    verbose: bool,
+    pipe_args: tuple[str, ...],
+) -> None:
+    """
+    Run an arbitrary chain of composable pipes.
+
+    Pipe flags open a new section; options that follow belong to that pipe.
+    Pipe sections are applied left-to-right.
+
+    \b
+    Available pipes
+    ---------------
+      --dequant-fp8   [--dtype {bf16,fp16,fp32}]  [--block-size N]  [--device DEV]
+      --merge-lora    --adapter PATH  [--adapter-config PATH]  [--adapter-name NAME]
+                      [--scale F]  [--device DEV]
+      --key-filter    [--include GLOB ...]  [--exclude GLOB ...]
+      --key-rename    [--rule PATTERN REPLACEMENT ...]
+      --dtype-cast    --dtype {float32,float16,bfloat16,float64}
+
+    \b
+    Examples:
+        # Dequantise FP8 then fuse a LoRA adapter
+        tftf run -i ./DeepSeek-V3/ -o ./merged/ \\
+            --dequant-fp8 --dtype bf16 \\
+            --merge-lora --adapter /mnt/trainerdir
+
+        # Auto-detect adapter format from a training output directory
+        tftf run -i ./llama-7b/ -o ./merged/ \\
+            --merge-lora --adapter ./training-output/ \\
+            --dtype-cast --dtype bf16
+
+        # Rename keys, filter, cast — no base model merge
+        tftf run -i ./model/ -o ./out/ \\
+            --key-rename --rule '^transformer\\.h\\.' 'model.layers.' \\
+            --key-filter --include '*self_attn*' \\
+            --dtype-cast --dtype bf16
+    """
+    _setup_logging(verbose)
+    pipe = _parse_pipe_chain(pipe_args)
+    writer = _make_writer(output_path, dry_run=dry_run, max_shard_size=max_shard_size)
+    Pipeline(
+        reader=_open_reader(input_path),
+        pipe=pipe,
+        writer=writer,
+    ).run(show_progress=not no_progress, progress_desc="run")
     _finish_write(writer)
     if not dry_run:
         _copy_model_extras(_model_dir(input_path), output_path)
