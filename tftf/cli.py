@@ -6,7 +6,6 @@ Commands
 info              Print tensor names, shapes, dtypes, and file metadata.
 passthrough       Copy a model one tensor at a time.
 merge-lora        Fuse a single-file LoRA adapter into a base model.
-merge-fsdp-lora   Fuse a per-rank FSDP-sharded LoRA adapter into a base model.
 merge-dcp-lora    Fuse a DCP-format FSDP-sharded LoRA adapter into a base model.
 validate          Dry-run the pipeline and report validation results.
 
@@ -37,7 +36,6 @@ from tftf.pipeline import Pipeline
 from tftf.pipes.base import Pipe
 from tftf.pipes.dtype_cast import DTypeCastPipe
 from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
-from tftf.pipes.fsdp_lora_merge import FSDPShardMergePipe
 from tftf.pipes.key_filter import KeyFilterPipe
 from tftf.pipes.key_rename import KeyRenamePipe
 from tftf.pipes.lora_merge import LoRAMergePipe
@@ -383,113 +381,6 @@ def merge_lora(
         pipe=pipe,
         writer=writer,
     ).run(show_progress=not no_progress, progress_desc="merge-lora")
-    _finish_write(writer)
-
-
-# ---------------------------------------------------------------------------
-# merge-fsdp-lora
-# ---------------------------------------------------------------------------
-
-
-@cli.command("merge-fsdp-lora")
-@click.option("-b", "--base", "base_path", required=True, type=_MODEL_PATH_TYPE,
-              help="Base model (file, directory, or index.json).")
-@click.option("-s", "--shards", "shard_paths", multiple=True,
-              type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="Per-rank adapter shard file, in rank order (repeatable).")
-@click.option("--shard-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
-              default=None,
-              help="Directory of per-rank shard files, sorted alphabetically.")
-@click.option("-o", "--output", "output_path", required=True, type=click.Path(path_type=Path),
-              help="Output path.")
-@click.option("--adapter-config", type=click.Path(dir_okay=False, path_type=Path), default=None,
-              help="adapter_config.json (auto-detected from first shard's dir).")
-@click.option("--adapter-name", default="default", show_default=True)
-@click.option("--scale", default=1.0, show_default=True, type=float)
-@click.option("--shard-dim", default=0, show_default=True, type=int,
-              help="Dimension tensors are sharded along across ranks.")
-@click.option("--device", default="cpu", show_default=True)
-@click.option("--dtype", type=click.Choice(list(_DTYPE_CHOICES), case_sensitive=False),
-              default=None, help="Cast merged weights to this dtype.")
-@click.option("--rename", "rename_rules", multiple=True, nargs=2,
-              metavar="PATTERN REPLACEMENT",
-              help="Rename tensor keys via regex before merging (repeatable).")
-@_common_write_options
-@click.option("--no-progress", is_flag=True)
-@click.option("-v", "--verbose", is_flag=True)
-def merge_fsdp_lora(
-    base_path: Path,
-    shard_paths: tuple[Path, ...],
-    shard_dir: Optional[Path],
-    output_path: Path,
-    adapter_config: Optional[Path],
-    adapter_name: str,
-    scale: float,
-    shard_dim: int,
-    device: str,
-    dtype: Optional[str],
-    rename_rules: tuple[tuple[str, str], ...],
-    dry_run: bool,
-    sharded: bool,
-    max_shard_size: int,
-    no_progress: bool,
-    verbose: bool,
-) -> None:
-    """
-    Fuse a per-rank FSDP-sharded LoRA adapter into a base model.
-
-    Reconstructs full LoRA matrices by concatenating per-rank shard tensors
-    along --shard-dim (default 0), then merges them into the base model.
-    Provide shard files in rank order via --shards or --shard-dir.
-
-    \b
-    Examples:
-        # Explicit shard files
-        tftf merge-fsdp-lora \\
-            -b ./llama-7b/ \\
-            -s ./run/rank_00.safetensors \\
-            -s ./run/rank_01.safetensors \\
-            -o ./merged.safetensors
-
-        # Directory of shards
-        tftf merge-fsdp-lora \\
-            -b ./llama-7b/ --shard-dir ./run/ \\
-            -o ./merged/ --sharded --dtype bfloat16
-
-        # Dry-run validation
-        tftf merge-fsdp-lora \\
-            -b ./llama-7b/ --shard-dir ./run/ \\
-            -o /dev/null --dry-run
-    """
-    _setup_logging(verbose)
-
-    if not shard_paths and shard_dir is None:
-        raise click.UsageError("Provide either --shards (repeatable) or --shard-dir.")
-    if shard_paths and shard_dir is not None:
-        raise click.UsageError("Provide only one of --shards or --shard-dir.")
-
-    pipe: Pipe = PassthroughPipe()
-    if rename_rules:
-        pipe = pipe | KeyRenamePipe(list(rename_rules))
-    pipe = pipe | FSDPShardMergePipe(
-        shard_paths=list(shard_paths) if shard_paths else None,
-        shard_dir=shard_dir,
-        config_path=adapter_config,
-        adapter_name=adapter_name,
-        scale=scale,
-        shard_dim=shard_dim,
-        device=device,
-    )
-    if dtype:
-        pipe = pipe | DTypeCastPipe(_DTYPE_CHOICES[dtype])
-
-    writer = _make_writer(output_path, dry_run=dry_run, sharded=sharded,
-                          max_shard_size=max_shard_size)
-    Pipeline(
-        reader=_open_reader(base_path, device=device),
-        pipe=pipe,
-        writer=writer,
-    ).run(show_progress=not no_progress, progress_desc="merge-fsdp-lora")
     _finish_write(writer)
 
 

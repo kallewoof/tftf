@@ -35,7 +35,7 @@ Keep q/k/v projections but not output projection::
 
 Use case in practice
 --------------------
-When running ``merge-fsdp-lora`` on a very large sharded model, you may want
+When running ``merge-dcp-lora`` on a very large sharded model, you may want
 to merge only a subset of layers and pass the rest through unchanged.  Pipe
 a KeyFilterPipe before the merge pipe to select the target tensors, then
 merge the two output streams (not yet implemented — future SplitMergePipe).

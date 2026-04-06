@@ -1,10 +1,9 @@
 """
 LoRAMergeBase — shared implementation of the LoRA merge Pipe interface.
 
-Both LoRAMergePipe (single adapter file) and FSDPShardMergePipe (per-rank
-shard files) perform the identical merge operation once the full lora_A /
-lora_B tensors are assembled.  Previously this logic was copy-pasted between
-the two classes.  This base class holds the shared implementation; subclasses
+Both LoRAMergePipe (single adapter file) and DCPLoRAMergePipe (DCP checkpoint)
+perform the identical merge operation once the full lora_A / lora_B tensors
+are assembled.  This base class holds the shared implementation; subclasses
 only need to implement setup() to populate _lora_weights and _config.
 
 Required contract for subclasses

@@ -22,7 +22,6 @@ from tftf.pipeline import Pipeline
 from tftf.pipes._lora_base import LoRAMergeBase
 from tftf.pipes.base import CompoundPipe, Pipe, TensorMeta, TensorRecord
 from tftf.pipes.dtype_cast import DTypeCastPipe
-from tftf.pipes.fsdp_lora_merge import FSDPShardMergePipe
 from tftf.pipes.key_filter import KeyFilterPipe
 from tftf.pipes.key_rename import KeyRenamePipe
 from tftf.pipes.lora_merge import LoRAMergePipe
@@ -443,14 +442,6 @@ class TestLoRAMergeBase:
         assert len(pipe._lora_weights) == 0
         assert pipe._config is None
 
-    def test_fsdp_is_also_lora_merge_base(self, tmp_path):
-        shard_dir = tmp_path / "shards"
-        shard_dir.mkdir()
-        t = {"base_model.model.w.lora_A.weight": torch.randn(2, 4)}
-        _save(t, shard_dir / "rank_00.safetensors")
-        pipe = FSDPShardMergePipe(shard_dir=shard_dir)
-        assert isinstance(pipe, LoRAMergeBase)
-
 
 # ===========================================================================
 # __repr__ on all pipes
@@ -496,16 +487,6 @@ class TestPipeRepr:
         assert "LoRAMergePipe" in r
         assert "not loaded" not in r  # should show tensor count
         pipe.teardown()
-
-    def test_fsdp_merge_repr(self, tmp_path):
-        shard_dir = tmp_path / "sd"
-        shard_dir.mkdir()
-        t = {"base_model.model.w.lora_A.weight": torch.randn(2, 4),
-             "base_model.model.w.lora_B.weight": torch.zeros(8, 2)}
-        _save(t, shard_dir / "rank_00.safetensors")
-        r = repr(FSDPShardMergePipe(shard_dir=shard_dir))
-        assert "FSDPShardMergePipe" in r
-        assert "shards=1" in r
 
     def test_compound_pipe_repr(self):
         pipe = PassthroughPipe() | DTypeCastPipe(torch.float16)
@@ -564,40 +545,6 @@ class TestDryRunIntegration:
         w = NullWriter()
         Pipeline(SafetensorsReader(base_path), PassthroughPipe(), w).run(show_progress=False)
         assert w.report.n_tensors == len(w._written_keys)
-
-    def test_fsdp_dry_run_ok(self, tmp_path):
-        base_path, _ = _make_base(tmp_path)
-        shard_dir = tmp_path / "shards"
-        shard_dir.mkdir()
-
-        # q_proj.weight is (32, 16) in BASE, so:
-        #   lora_A: (LORA_RANK, 16)  chunk_a = LORA_RANK // 2 rows per rank
-        #   lora_B: (32, LORA_RANK)  chunk_b = 32 // 2 = 16 rows per rank
-        world_size = 2
-        out_f = 32
-        lora_a = torch.randn(LORA_RANK, 16) * 0.01
-        lora_b = torch.zeros(out_f, LORA_RANK)
-        chunk_a = LORA_RANK // world_size   # 2
-        chunk_b = out_f    // world_size    # 16
-        for i in range(world_size):
-            t = {
-                "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight":
-                    lora_a[i*chunk_a:(i+1)*chunk_a].clone(),
-                "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight":
-                    lora_b[i*chunk_b:(i+1)*chunk_b].clone(),
-            }
-            _save(t, shard_dir / f"rank_{i:02d}.safetensors")
-        (shard_dir / "adapter_config.json").write_text(
-            json.dumps({"r": LORA_RANK, "lora_alpha": LORA_ALPHA})
-        )
-
-        w = NullWriter()
-        Pipeline(
-            SafetensorsReader(base_path),
-            FSDPShardMergePipe(shard_dir=shard_dir),
-            w,
-        ).run(show_progress=False)
-        assert w.report.ok
 
 
 # ===========================================================================

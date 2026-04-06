@@ -22,12 +22,10 @@ Extending
 Subclass Pipe, implement process(), and optionally override process_meta()
 if your pipe changes tensor keys, shapes, or dtypes.
 
-Future: FSDPShardMergePipe
---------------------------
-FSDP produces one .safetensors shard per rank.  A future FSDPShardMergePipe
-will accept a list of shard paths, reconstruct the full parameter tensors
-on-the-fly (via concatenation / all-gather), and yield them in base-model
-key order.  The Pipe interface is identical — only the *source* changes.
+FSDP sharded LoRA
+-----------------
+For adapters trained with FSDP, use DCPLoRAMergePipe which accepts a
+pytorch_model_fsdp_0/ DCP checkpoint directory directly.
 To prepare for this: keep process() purely iterator→iterator, and put any
 multi-source logic in a custom Reader (see io/reader.py).
 """

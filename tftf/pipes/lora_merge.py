@@ -16,11 +16,9 @@ PEFT LoRA adapters use a `base_model.model.` prefix and `.lora_A.weight` /
 `.lora_B.weight` suffixes.  See utils/lora.py for the full mapping logic,
 which handles adapter names, embedding layers, and several PEFT versions.
 
-Future: FSDP sharded LoRA
---------------------------
-For FSDP-sharded adapters (one .safetensors per rank), use FSDPShardMergePipe.
-It inherits the same LoRAMergeBase and only differs in how setup() loads the
-weights (by concatenating per-rank shards).
+FSDP sharded LoRA
+-----------------
+For adapters trained with FSDP (DCP checkpoint format), use DCPLoRAMergePipe.
 """
 
 from __future__ import annotations

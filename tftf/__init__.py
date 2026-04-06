@@ -21,7 +21,7 @@ from tftf.pipes.key_filter import KeyFilterPipe
 from tftf.pipes.key_rename import KeyRenamePipe
 from tftf.pipes._lora_base import LoRAMergeBase
 from tftf.pipes.lora_merge import LoRAMergePipe
-from tftf.pipes.fsdp_lora_merge import FSDPShardMergePipe
+from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
 from tftf.pipes.fp8_dequant import FP8DequantPipe
 
 __all__ = [
@@ -48,6 +48,6 @@ __all__ = [
     "KeyRenamePipe",
     "LoRAMergeBase",
     "LoRAMergePipe",
-    "FSDPShardMergePipe",
+    "DCPLoRAMergePipe",
     "FP8DequantPipe",
 ]
