@@ -106,7 +106,20 @@ class LoRAMergeBase(Pipe):
 
         effective_scale = self.scale * self._config.default_scale
 
+        target_modules = self._config.target_modules
+
         for record in records:
+            # If target_modules is specified, skip keys whose stem doesn't
+            # match any listed module name.
+            if target_modules:
+                stem = record.key.removesuffix(".weight")
+                if not any(
+                    stem == tm or stem.endswith(f".{tm}")
+                    for tm in target_modules
+                ):
+                    yield record
+                    continue
+
             match = find_lora_keys(
                 record.key,
                 self._adapter_key_set,

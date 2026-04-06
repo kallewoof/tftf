@@ -502,3 +502,100 @@ def test_conv2d_lora_merge_nonzero_delta(tmp_path):
     # B@A = 2.0 everywhere → delta = (4,2,1,1) of 2.0
     # merged = 0 + 1.0 * 2.0 = 2.0
     assert torch.allclose(merged, torch.full((4, 2, 1, 1), 2.0), atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Tests: target_modules is respected
+# ---------------------------------------------------------------------------
+
+
+def _make_lora_nonzero_b(
+    tmp: Path,
+    rank: int = 2,
+    alpha: float = 2.0,
+    target_modules: list[str] | None = None,
+) -> tuple[Path, Path]:
+    """
+    LoRA adapter with NON-ZERO lora_B for both q_proj and v_proj so that any
+    un-gated merge will visibly change the weight.
+    """
+    import json
+
+    lora_tensors = {
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(rank, 32),
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight": torch.ones(64, rank),
+        "base_model.model.model.layers.0.self_attn.v_proj.lora_A.weight": torch.ones(rank, 32),
+        "base_model.model.model.layers.0.self_attn.v_proj.lora_B.weight": torch.ones(64, rank),
+    }
+    adapter_path = tmp / "adapter_model.safetensors"
+    _save(lora_tensors, adapter_path)
+
+    cfg = {
+        "r": rank,
+        "lora_alpha": alpha,
+        "target_modules": target_modules if target_modules is not None else ["q_proj", "v_proj"],
+    }
+    config_path = tmp / "adapter_config.json"
+    config_path.write_text(json.dumps(cfg))
+
+    return adapter_path, config_path
+
+
+def test_target_modules_restricts_merge_to_listed_keys(tmp_path):
+    """
+    When target_modules=["q_proj"], only q_proj should be merged.
+    v_proj has LoRA keys in the adapter but is NOT in target_modules, so it
+    must come out unchanged.
+    """
+    base_path, base_tensors = _make_base(tmp_path)
+    adapter_path, _ = _make_lora_nonzero_b(tmp_path, target_modules=["q_proj"])
+    out_path = tmp_path / "merged.safetensors"
+
+    Pipeline(
+        SafetensorsReader(base_path),
+        LoRAMergePipe(adapter_path=adapter_path),
+        StreamingWriter(out_path),
+    ).run(show_progress=False)
+
+    result = _load(out_path)
+
+    # q_proj IS in target_modules → weight should have changed
+    assert not torch.allclose(
+        result["model.layers.0.self_attn.q_proj.weight"],
+        base_tensors["model.layers.0.self_attn.q_proj.weight"],
+    ), "q_proj should have been merged but was not"
+
+    # v_proj is NOT in target_modules → weight must be unchanged
+    assert torch.allclose(
+        result["model.layers.0.self_attn.v_proj.weight"],
+        base_tensors["model.layers.0.self_attn.v_proj.weight"],
+    ), "v_proj should NOT have been merged, but it was"
+
+
+def test_target_modules_empty_merges_all_matching_keys(tmp_path):
+    """
+    When target_modules=[], all keys with matching LoRA pairs are merged
+    (the empty list means no restriction).
+    """
+    base_path, base_tensors = _make_base(tmp_path)
+    adapter_path, _ = _make_lora_nonzero_b(tmp_path, target_modules=[])
+    out_path = tmp_path / "merged.safetensors"
+
+    Pipeline(
+        SafetensorsReader(base_path),
+        LoRAMergePipe(adapter_path=adapter_path),
+        StreamingWriter(out_path),
+    ).run(show_progress=False)
+
+    result = _load(out_path)
+
+    # Both should have changed because lora_B is non-zero
+    assert not torch.allclose(
+        result["model.layers.0.self_attn.q_proj.weight"],
+        base_tensors["model.layers.0.self_attn.q_proj.weight"],
+    ), "q_proj should have been merged"
+
+    assert not torch.allclose(
+        result["model.layers.0.self_attn.v_proj.weight"],
+        base_tensors["model.layers.0.self_attn.v_proj.weight"],
+    ), "v_proj should have been merged"

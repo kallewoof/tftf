@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install with dev dependencies
+# Install with dev dependencies (requires Python ≥ 3.11)
 pip install -e ".[dev]"
 
 # Run all tests
@@ -76,6 +76,16 @@ class Pipe(ABC):
 ```
 
 Key rule: pipes must be **lazy** — don't buffer streams, free tensors immediately after yielding. A pipe may drop records (filter) or emit additional ones (e.g. dequant reads scale tensors to augment weight tensors).
+
+`TensorMeta` and `TensorRecord` both carry an `extra: dict` for arbitrary side-channel data (e.g. shard provenance, quantization params). Pipes can read/write `extra` to pass state between `process_meta()` and `process()` without breaking the streaming contract.
+
+`LoRAMergePipe` and `FSDPShardMergePipe` both inherit from `LoRAMergeBase` (`pipes/_lora_base.py`). Subclasses must populate `_config`, `_lora_weights`, and `_adapter_key_set` during `setup()`.
+
+`FP8DequantPipe` requires `process_meta()` to run before `process()` — it raises `RuntimeError` otherwise. Scale tensors (`weight_scale_inv` / `weight_scale`) and weight tensors may arrive in either order; the pipe buffers them in a small pending dict until the pair is complete.
+
+`ShardedSafetensorsReader.from_path()` accepts a directory, a direct `model.safetensors.index.json` path, or a single `.safetensors` file (falls back to `SafetensorsReader`). Readers implement a duck-typed `ReaderProtocol` (iter_meta, iter_records, metadata, num_tensors).
+
+`NullWriter` returns a `ValidationReport` that cross-checks Phase 1 declarations against Phase 2 actuals (shapes, dtypes, missing/extra tensors). Call `report.summary()` for a formatted pass/fail printout.
 
 ### Tests
 
