@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
-Name: model-pipe
+Name: tftf
 Version: 0.3.0
 Summary: Streaming operations on HuggingFace .safetensors models
 License: MIT
@@ -14,7 +14,7 @@ Provides-Extra: dev
 Requires-Dist: pytest>=7; extra == "dev"
 Requires-Dist: pytest-cov; extra == "dev"
 
-# model-pipe
+# tftf (Transforming Transformers)
 
 Streaming operations on HuggingFace `.safetensors` models.
 
@@ -58,39 +58,39 @@ All write commands accept `--dry-run` (validate without writing), `--sharded` (w
 ### `info` — inspect a model
 
 ```bash
-model-pipe info ./llama-7b/
-model-pipe info ./model.safetensors --filter q_proj
-model-pipe info ./DeepSeek-V3/ --dtype-summary
+tftf info ./llama-7b/
+tftf info ./model.safetensors --filter q_proj
+tftf info ./DeepSeek-V3/ --dtype-summary
 ```
 
 ### `passthrough` — copy without loading the full model
 
 ```bash
 # Copy and cast to bfloat16
-model-pipe passthrough -i ./model.safetensors -o ./model-bf16.safetensors --dtype bfloat16
+tftf passthrough -i ./model.safetensors -o ./model-bf16.safetensors --dtype bfloat16
 
 # Copy a sharded model, writing output as new shards
-model-pipe passthrough -i ./llama-70b/ -o ./llama-70b-copy/ --sharded
+tftf passthrough -i ./llama-70b/ -o ./llama-70b-copy/ --sharded
 
 # Copy only attention weights
-model-pipe passthrough -i ./model.safetensors -o ./attn.safetensors \
+tftf passthrough -i ./model.safetensors -o ./attn.safetensors \
     --include '*self_attn*'
 
 # Validate without writing
-model-pipe passthrough -i ./model.safetensors -o /dev/null --dry-run
+tftf passthrough -i ./model.safetensors -o /dev/null --dry-run
 ```
 
 ### `dequant-fp8` — dequantise fine-grained FP8 to BF16/FP16
 
 ```bash
 # Dequantise DeepSeek-V3 to bfloat16, writing sharded output
-model-pipe dequant-fp8 \
+tftf dequant-fp8 \
     -i ./DeepSeek-V3/ \
     -o ./DeepSeek-V3-bf16/ \
     --sharded
 
 # Dequantise then fuse a LoRA adapter in one pass
-model-pipe dequant-fp8 \
+tftf dequant-fp8 \
     -i ./DeepSeek-V3/ \
     -o ./merged/ \
     --dtype bfloat16 \
@@ -98,7 +98,7 @@ model-pipe dequant-fp8 \
     --sharded
 
 # Dry-run to validate the pipeline before committing disk space
-model-pipe dequant-fp8 \
+tftf dequant-fp8 \
     -i ./DeepSeek-V3/ \
     -o /dev/null \
     --dtype bfloat16 \
@@ -108,14 +108,14 @@ model-pipe dequant-fp8 \
 ### `merge-lora` — fuse a LoRA adapter into a base model
 
 ```bash
-model-pipe merge-lora \
+tftf merge-lora \
     -b ./llama-7b/ \
     -a ./my-lora/adapter_model.safetensors \
     -o ./merged.safetensors \
     --dtype bfloat16
 
 # Write as shards with key renaming
-model-pipe merge-lora \
+tftf merge-lora \
     -b ./llama-7b/ \
     -a ./adapter_model.safetensors \
     -o ./merged/ --sharded \
@@ -126,14 +126,14 @@ model-pipe merge-lora \
 
 ```bash
 # Explicit per-rank files
-model-pipe merge-fsdp-lora \
+tftf merge-fsdp-lora \
     -b ./llama-7b/ \
     -s ./run/rank_00.safetensors \
     -s ./run/rank_01.safetensors \
     -o ./merged.safetensors
 
 # Directory of shard files (sorted alphabetically = rank order)
-model-pipe merge-fsdp-lora \
+tftf merge-fsdp-lora \
     -b ./llama-7b/ --shard-dir ./run/ \
     -o ./merged/ --sharded --dtype bfloat16
 ```
@@ -141,10 +141,10 @@ model-pipe merge-fsdp-lora \
 ### `validate` — validate without writing
 
 ```bash
-model-pipe validate ./model.safetensors
-model-pipe validate ./llama-70b/
-model-pipe validate ./model.safetensors --pipe dtype:bfloat16
-model-pipe validate ./model.safetensors --pipe filter:*q_proj*
+tftf validate ./model.safetensors
+tftf validate ./llama-70b/
+tftf validate ./model.safetensors --pipe dtype:bfloat16
+tftf validate ./model.safetensors --pipe filter:*q_proj*
 ```
 
 ---
@@ -154,7 +154,7 @@ model-pipe validate ./model.safetensors --pipe filter:*q_proj*
 ### FP8 dequantisation + LoRA merge in one pass
 
 ```python
-from model_pipe import (
+from tftf import (
     Pipeline,
     ShardedSafetensorsReader,
     ShardedWriter,
@@ -175,7 +175,7 @@ Pipeline(
 ### Dry-run validation
 
 ```python
-from model_pipe import Pipeline, SafetensorsReader, NullWriter, FP8DequantPipe
+from tftf import Pipeline, SafetensorsReader, NullWriter, FP8DequantPipe
 import torch
 
 writer = NullWriter()
@@ -192,7 +192,7 @@ assert writer.report.ok
 ### LoRA merge with dtype cast
 
 ```python
-from model_pipe import Pipeline, SafetensorsReader, StreamingWriter, LoRAMergePipe, DTypeCastPipe
+from tftf import Pipeline, SafetensorsReader, StreamingWriter, LoRAMergePipe, DTypeCastPipe
 import torch
 
 pipe = LoRAMergePipe("adapter_model.safetensors") | DTypeCastPipe(torch.float16)
@@ -284,7 +284,7 @@ Override `process_meta()` only when your pipe changes keys, shapes, or dtypes. T
 ### Writing a new pipe
 
 ```python
-from model_pipe.pipes.base import Pipe, TensorRecord, TensorMeta
+from tftf.pipes.base import Pipe, TensorRecord, TensorMeta
 from typing import Iterator
 import torch
 

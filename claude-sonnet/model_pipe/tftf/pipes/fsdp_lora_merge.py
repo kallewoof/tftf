@@ -40,13 +40,13 @@ from typing import Optional
 
 from safetensors import safe_open
 
-from model_pipe.pipes._lora_base import LoRAMergeBase
-from model_pipe.utils.fsdp import (
+from tftf.pipes._lora_base import LoRAMergeBase
+from tftf.utils.fsdp import (
     check_for_flat_params,
     find_shard_files,
     reconstruct_from_shards,
 )
-from model_pipe.utils.lora import LoRAConfig
+from tftf.utils.lora import LoRAConfig
 
 logger = logging.getLogger(__name__)
 

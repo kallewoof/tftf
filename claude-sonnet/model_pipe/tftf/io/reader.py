@@ -32,7 +32,7 @@ from typing import Iterator
 import torch
 from safetensors import safe_open
 
-from model_pipe.pipes.base import TensorMeta, TensorRecord
+from tftf.pipes.base import TensorMeta, TensorRecord
 
 logger = logging.getLogger(__name__)
 

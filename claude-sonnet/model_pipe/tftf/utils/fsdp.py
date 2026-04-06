@@ -118,5 +118,5 @@ def check_for_flat_params(keys: list[str]) -> None:
             + ("\n  …and more." if len(flat_keys) > 5 else "")
             + "\n\nFlat-param reconstruction requires shape metadata that is not yet "
             "supported.  Use FSDP with FULL_STATE_DICT or a direct-sharding "
-            "strategy, or manually unflatten the shards before using model-pipe."
+            "strategy, or manually unflatten the shards before using tftf."
         )

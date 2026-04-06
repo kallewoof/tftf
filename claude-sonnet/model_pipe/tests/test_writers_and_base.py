@@ -13,21 +13,21 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from model_pipe.io.null_writer import NullWriter, ValidationReport
-from model_pipe.io.reader import SafetensorsReader
-from model_pipe.io.sharded_reader import ShardedSafetensorsReader
-from model_pipe.io.sharded_writer import ShardedWriter
-from model_pipe.io.writer import StreamingWriter
-from model_pipe.pipeline import Pipeline
-from model_pipe.pipes._lora_base import LoRAMergeBase
-from model_pipe.pipes.base import CompoundPipe, Pipe, TensorMeta, TensorRecord
-from model_pipe.pipes.dtype_cast import DTypeCastPipe
-from model_pipe.pipes.fsdp_lora_merge import FSDPShardMergePipe
-from model_pipe.pipes.key_filter import KeyFilterPipe
-from model_pipe.pipes.key_rename import KeyRenamePipe
-from model_pipe.pipes.lora_merge import LoRAMergePipe
-from model_pipe.pipes.passthrough import PassthroughPipe
-from model_pipe.utils.lora import LoRAConfig, merge_lora
+from tftf.io.null_writer import NullWriter, ValidationReport
+from tftf.io.reader import SafetensorsReader
+from tftf.io.sharded_reader import ShardedSafetensorsReader
+from tftf.io.sharded_writer import ShardedWriter
+from tftf.io.writer import StreamingWriter
+from tftf.pipeline import Pipeline
+from tftf.pipes._lora_base import LoRAMergeBase
+from tftf.pipes.base import CompoundPipe, Pipe, TensorMeta, TensorRecord
+from tftf.pipes.dtype_cast import DTypeCastPipe
+from tftf.pipes.fsdp_lora_merge import FSDPShardMergePipe
+from tftf.pipes.key_filter import KeyFilterPipe
+from tftf.pipes.key_rename import KeyRenamePipe
+from tftf.pipes.lora_merge import LoRAMergePipe
+from tftf.pipes.passthrough import PassthroughPipe
+from tftf.utils.lora import LoRAConfig, merge_lora
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ class TestShardedWriter:
         #   embed (4096 > limit → own shard), norm (64 → packs with prev)
         # Results in 4 shards: [q],[v],[l1q+norm],[embed] or similar.
         # The exact count depends on arrival order; just assert the index is complete.
-        from model_pipe.io.sharded_reader import ShardedSafetensorsReader
+        from tftf.io.sharded_reader import ShardedSafetensorsReader
         idx_path = out_dir / "model.safetensors.index.json"
         assert idx_path.exists()
         reader = ShardedSafetensorsReader(idx_path)
@@ -609,21 +609,21 @@ class TestMakeWriter:
     """Unit-test the _make_writer factory used by all CLI commands."""
 
     def test_returns_null_writer_on_dry_run(self, tmp_path):
-        from model_pipe.cli import _make_writer
+        from tftf.cli import _make_writer
         w = _make_writer(tmp_path / "out.safetensors", dry_run=True)
         assert isinstance(w, NullWriter)
 
     def test_returns_sharded_writer_on_sharded(self, tmp_path):
-        from model_pipe.cli import _make_writer
+        from tftf.cli import _make_writer
         w = _make_writer(tmp_path / "out", sharded=True)
         assert isinstance(w, ShardedWriter)
 
     def test_returns_streaming_writer_by_default(self, tmp_path):
-        from model_pipe.cli import _make_writer
+        from tftf.cli import _make_writer
         w = _make_writer(tmp_path / "out.safetensors")
         assert isinstance(w, StreamingWriter)
 
     def test_dry_run_takes_priority_over_sharded(self, tmp_path):
-        from model_pipe.cli import _make_writer
+        from tftf.cli import _make_writer
         w = _make_writer(tmp_path / "out", dry_run=True, sharded=True)
         assert isinstance(w, NullWriter)

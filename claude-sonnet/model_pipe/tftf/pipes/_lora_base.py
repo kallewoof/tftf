@@ -25,8 +25,8 @@ from typing import Iterator, Optional
 
 import torch
 
-from model_pipe.pipes.base import Pipe, TensorMeta, TensorRecord
-from model_pipe.utils.lora import LoRAConfig, find_lora_keys, merge_lora
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.utils.lora import LoRAConfig, find_lora_keys, merge_lora
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
 """
-model-pipe — streaming operations on HuggingFace .safetensors models.
+tftf — streaming operations on HuggingFace .safetensors models.
 
 Commands
 --------
@@ -28,18 +28,18 @@ from typing import Optional, Union
 import click
 import torch
 
-from model_pipe.io.null_writer import NullWriter, ValidationReport
-from model_pipe.io.sharded_reader import ShardedSafetensorsReader
-from model_pipe.io.sharded_writer import ShardedWriter
-from model_pipe.io.writer import StreamingWriter, _DTYPE_ITEMSIZE
-from model_pipe.pipeline import Pipeline
-from model_pipe.pipes.base import Pipe
-from model_pipe.pipes.dtype_cast import DTypeCastPipe
-from model_pipe.pipes.fsdp_lora_merge import FSDPShardMergePipe
-from model_pipe.pipes.key_filter import KeyFilterPipe
-from model_pipe.pipes.key_rename import KeyRenamePipe
-from model_pipe.pipes.lora_merge import LoRAMergePipe
-from model_pipe.pipes.passthrough import PassthroughPipe
+from tftf.io.null_writer import NullWriter, ValidationReport
+from tftf.io.sharded_reader import ShardedSafetensorsReader
+from tftf.io.sharded_writer import ShardedWriter
+from tftf.io.writer import StreamingWriter, _DTYPE_ITEMSIZE
+from tftf.pipeline import Pipeline
+from tftf.pipes.base import Pipe
+from tftf.pipes.dtype_cast import DTypeCastPipe
+from tftf.pipes.fsdp_lora_merge import FSDPShardMergePipe
+from tftf.pipes.key_filter import KeyFilterPipe
+from tftf.pipes.key_rename import KeyRenamePipe
+from tftf.pipes.lora_merge import LoRAMergePipe
+from tftf.pipes.passthrough import PassthroughPipe
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -132,7 +132,7 @@ def _common_write_options(f):
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option("0.3.0", prog_name="model-pipe")
+@click.version_option("0.3.0", prog_name="tftf")
 def cli() -> None:
     """
     Streaming operations on HuggingFace .safetensors models.
@@ -259,16 +259,16 @@ def passthrough(
     \b
     Examples:
         # Copy and cast to bfloat16
-        model-pipe passthrough -i ./llama-70b/ -o ./out.safetensors --dtype bfloat16
+        tftf passthrough -i ./llama-70b/ -o ./out.safetensors --dtype bfloat16
 
         # Write output as shards
-        model-pipe passthrough -i ./model.safetensors -o ./out/ --sharded
+        tftf passthrough -i ./model.safetensors -o ./out/ --sharded
 
         # Validate without writing
-        model-pipe passthrough -i ./model.safetensors -o /dev/null --dry-run
+        tftf passthrough -i ./model.safetensors -o /dev/null --dry-run
 
         # Copy only attention weights
-        model-pipe passthrough -i ./model.safetensors -o ./attn.safetensors \\
+        tftf passthrough -i ./model.safetensors -o ./attn.safetensors \\
             --include '*self_attn*'
     """
     _setup_logging(verbose)
@@ -344,17 +344,17 @@ def merge_lora(
 
     \b
     Examples:
-        model-pipe merge-lora \\
+        tftf merge-lora \\
             -b ./llama-7b/ -a ./my-lora/adapter_model.safetensors \\
             -o ./merged.safetensors --dtype bfloat16
 
         # Validate merge without writing
-        model-pipe merge-lora \\
+        tftf merge-lora \\
             -b ./llama-7b/ -a ./adapter_model.safetensors \\
             -o /dev/null --dry-run
 
         # Write as shards, with key renaming
-        model-pipe merge-lora \\
+        tftf merge-lora \\
             -b ./llama-7b/ -a ./adapter_model.safetensors \\
             -o ./merged/ --sharded \\
             --rename '^transformer\\.h\\.' 'model.layers.'
@@ -443,19 +443,19 @@ def merge_fsdp_lora(
     \b
     Examples:
         # Explicit shard files
-        model-pipe merge-fsdp-lora \\
+        tftf merge-fsdp-lora \\
             -b ./llama-7b/ \\
             -s ./run/rank_00.safetensors \\
             -s ./run/rank_01.safetensors \\
             -o ./merged.safetensors
 
         # Directory of shards
-        model-pipe merge-fsdp-lora \\
+        tftf merge-fsdp-lora \\
             -b ./llama-7b/ --shard-dir ./run/ \\
             -o ./merged/ --sharded --dtype bfloat16
 
         # Dry-run validation
-        model-pipe merge-fsdp-lora \\
+        tftf merge-fsdp-lora \\
             -b ./llama-7b/ --shard-dir ./run/ \\
             -o /dev/null --dry-run
     """
@@ -516,10 +516,10 @@ def validate(model: Path, pipe_spec: Optional[str], verbose: bool) -> None:
 
     \b
     Examples:
-        model-pipe validate ./model.safetensors
-        model-pipe validate ./llama-70b/
-        model-pipe validate ./model.safetensors --pipe dtype:bfloat16
-        model-pipe validate ./model.safetensors --pipe filter:*q_proj*
+        tftf validate ./model.safetensors
+        tftf validate ./llama-70b/
+        tftf validate ./model.safetensors --pipe dtype:bfloat16
+        tftf validate ./model.safetensors --pipe filter:*q_proj*
     """
     _setup_logging(verbose)
 
@@ -626,13 +626,13 @@ def dequant_fp8(
     \b
     Examples:
         # Dequantise DeepSeek-V3 to bfloat16
-        model-pipe dequant-fp8 \\
+        tftf dequant-fp8 \\
             -i ./DeepSeek-V3/ \\
             -o ./DeepSeek-V3-bf16/ \\
             --sharded
 
         # Dequantise then fuse a LoRA adapter, dry-run first
-        model-pipe dequant-fp8 \\
+        tftf dequant-fp8 \\
             -i ./DeepSeek-V3/ \\
             -o ./merged/ \\
             --dtype bfloat16 \\
@@ -640,12 +640,12 @@ def dequant_fp8(
             --sharded --dry-run
 
         # Dequantise to float16, write as a single file
-        model-pipe dequant-fp8 \\
+        tftf dequant-fp8 \\
             -i ./model.safetensors \\
             -o ./model-fp16.safetensors \\
             --dtype float16
     """
-    from model_pipe.pipes.fp8_dequant import FP8DequantPipe
+    from tftf.pipes.fp8_dequant import FP8DequantPipe
 
     _setup_logging(verbose)
 
@@ -658,7 +658,7 @@ def dequant_fp8(
     )
 
     if lora_adapter is not None:
-        from model_pipe.pipes.lora_merge import LoRAMergePipe
+        from tftf.pipes.lora_merge import LoRAMergePipe
         pipe = pipe | LoRAMergePipe(
             adapter_path=lora_adapter,
             config_path=lora_config,

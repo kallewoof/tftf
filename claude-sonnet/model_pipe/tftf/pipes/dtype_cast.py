@@ -6,7 +6,7 @@ from typing import Iterator
 
 import torch
 
-from model_pipe.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 
 
 class DTypeCastPipe(Pipe):

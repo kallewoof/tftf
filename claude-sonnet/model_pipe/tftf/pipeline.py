@@ -22,8 +22,8 @@ from typing import Iterator, Optional, Protocol, runtime_checkable
 
 from tqdm import tqdm
 
-from model_pipe.io.writer import StreamingWriter
-from model_pipe.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.io.writer import StreamingWriter
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +63,11 @@ class Pipeline:
 
     Example::
 
-        from model_pipe.io.sharded_reader import ShardedSafetensorsReader
-        from model_pipe.io.writer import StreamingWriter
-        from model_pipe.pipes.lora_merge import LoRAMergePipe
-        from model_pipe.pipes.dtype_cast import DTypeCastPipe
-        from model_pipe.pipeline import Pipeline
+        from tftf.io.sharded_reader import ShardedSafetensorsReader
+        from tftf.io.writer import StreamingWriter
+        from tftf.pipes.lora_merge import LoRAMergePipe
+        from tftf.pipes.dtype_cast import DTypeCastPipe
+        from tftf.pipeline import Pipeline
         import torch
 
         reader = ShardedSafetensorsReader.from_path("./llama-70b/")

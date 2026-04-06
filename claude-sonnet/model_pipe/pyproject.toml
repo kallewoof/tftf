@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "model-pipe"
+name = "tftf"
 version = "0.3.0"
 description = "Streaming operations on HuggingFace .safetensors models"
 readme = "README.md"
@@ -25,11 +25,11 @@ dev = [
 ]
 
 [project.scripts]
-model-pipe = "model_pipe.cli:cli"
+tftf = "tftf.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["model_pipe*"]
+include = ["tftf*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

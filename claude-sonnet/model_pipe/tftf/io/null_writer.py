@@ -26,8 +26,8 @@ import types
 from dataclasses import dataclass, field
 from typing import Optional
 
-from model_pipe.io.writer import _TORCH_TO_ST, _nbytes, StreamingWriter
-from model_pipe.pipes.base import TensorMeta, TensorRecord
+from tftf.io.writer import _TORCH_TO_ST, _nbytes, StreamingWriter
+from tftf.pipes.base import TensorMeta, TensorRecord
 
 
 @dataclass

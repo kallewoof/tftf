@@ -46,7 +46,7 @@ from typing import Optional
 
 import torch
 
-from model_pipe.pipes.base import TensorMeta, TensorRecord
+from tftf.pipes.base import TensorMeta, TensorRecord
 
 logger = logging.getLogger(__name__)
 

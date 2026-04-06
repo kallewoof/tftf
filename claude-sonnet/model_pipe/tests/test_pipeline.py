@@ -1,5 +1,5 @@
 """
-Tests for model-pipe.
+Tests for tftf.
 
 These tests use small in-memory tensors so they run without downloading
 any real model.  They verify:
@@ -18,14 +18,14 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from model_pipe.io.reader import SafetensorsReader
-from model_pipe.io.writer import StreamingWriter
-from model_pipe.pipeline import Pipeline
-from model_pipe.pipes.base import TensorMeta
-from model_pipe.pipes.dtype_cast import DTypeCastPipe
-from model_pipe.pipes.lora_merge import LoRAMergePipe
-from model_pipe.pipes.passthrough import PassthroughPipe
-from model_pipe.utils.lora import find_lora_keys, merge_lora
+from tftf.io.reader import SafetensorsReader
+from tftf.io.writer import StreamingWriter
+from tftf.pipeline import Pipeline
+from tftf.pipes.base import TensorMeta
+from tftf.pipes.dtype_cast import DTypeCastPipe
+from tftf.pipes.lora_merge import LoRAMergePipe
+from tftf.pipes.passthrough import PassthroughPipe
+from tftf.utils.lora import find_lora_keys, merge_lora
 
 
 # ---------------------------------------------------------------------------

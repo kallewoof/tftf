@@ -16,19 +16,19 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-import model_pipe.utils.fp8 as fp8_mod
-from model_pipe.io.null_writer import NullWriter
-from model_pipe.io.reader import SafetensorsReader
-from model_pipe.io.sharded_reader import ShardedSafetensorsReader
-from model_pipe.io.sharded_writer import ShardedWriter
-from model_pipe.io.writer import StreamingWriter
-from model_pipe.pipeline import Pipeline
-from model_pipe.pipes.base import Pipe, TensorMeta, TensorRecord
-from model_pipe.pipes.dtype_cast import DTypeCastPipe
-from model_pipe.pipes.fp8_dequant import FP8DequantPipe, _NOT_SCANNED
-from model_pipe.pipes.lora_merge import LoRAMergePipe
-from model_pipe.pipes.passthrough import PassthroughPipe
-from model_pipe.utils.fp8 import (
+import tftf.utils.fp8 as fp8_mod
+from tftf.io.null_writer import NullWriter
+from tftf.io.reader import SafetensorsReader
+from tftf.io.sharded_reader import ShardedSafetensorsReader
+from tftf.io.sharded_writer import ShardedWriter
+from tftf.io.writer import StreamingWriter
+from tftf.pipeline import Pipeline
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.pipes.dtype_cast import DTypeCastPipe
+from tftf.pipes.fp8_dequant import FP8DequantPipe, _NOT_SCANNED
+from tftf.pipes.lora_merge import LoRAMergePipe
+from tftf.pipes.passthrough import PassthroughPipe
+from tftf.utils.fp8 import (
     HAS_FP8,
     dequantize_fp8_weight,
     is_fp8_dtype,
@@ -639,11 +639,11 @@ class TestFP8Repr:
 class TestCLI:
 
     def test_dequant_fp8_registered(self):
-        from model_pipe.cli import cli
+        from tftf.cli import cli
         assert "dequant-fp8" in cli.commands
 
     def test_dequant_fp8_options(self):
-        from model_pipe.cli import cli
+        from tftf.cli import cli
         params = {p.name for p in cli.commands["dequant-fp8"].params}
         for expected in ("dtype", "lora_adapter", "dry_run", "sharded",
                          "max_shard_size", "block_size", "device"):

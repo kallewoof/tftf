@@ -31,8 +31,8 @@ from typing import Optional
 
 from safetensors import safe_open
 
-from model_pipe.pipes._lora_base import LoRAMergeBase
-from model_pipe.utils.lora import LoRAConfig
+from tftf.pipes._lora_base import LoRAMergeBase
+from tftf.utils.lora import LoRAConfig
 
 logger = logging.getLogger(__name__)
 

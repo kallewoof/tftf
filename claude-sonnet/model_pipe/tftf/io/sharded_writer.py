@@ -58,8 +58,8 @@ from typing import Optional
 
 import torch
 
-from model_pipe.pipes.base import TensorMeta, TensorRecord
-from model_pipe.io.writer import _TORCH_TO_ST, _DTYPE_ITEMSIZE, _nbytes, StreamingWriter
+from tftf.pipes.base import TensorMeta, TensorRecord
+from tftf.io.writer import _TORCH_TO_ST, _DTYPE_ITEMSIZE, _nbytes, StreamingWriter
 
 logger = logging.getLogger(__name__)
 

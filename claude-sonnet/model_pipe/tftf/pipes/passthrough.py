@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterator
 
-from model_pipe.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 
 
 class PassthroughPipe(Pipe):

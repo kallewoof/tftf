@@ -44,8 +44,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Iterator
 
-from model_pipe.io.reader import SafetensorsReader
-from model_pipe.pipes.base import TensorMeta, TensorRecord
+from tftf.io.reader import SafetensorsReader
+from tftf.pipes.base import TensorMeta, TensorRecord
 
 logger = logging.getLogger(__name__)
 

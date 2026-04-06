@@ -19,23 +19,23 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from model_pipe.io.reader import SafetensorsReader
-from model_pipe.io.sharded_reader import ShardedSafetensorsReader
-from model_pipe.io.writer import StreamingWriter
-from model_pipe.pipeline import Pipeline, ReaderProtocol
-from model_pipe.pipes.base import TensorMeta, TensorRecord
-from model_pipe.pipes.dtype_cast import DTypeCastPipe
-from model_pipe.pipes.fsdp_lora_merge import FSDPShardMergePipe
-from model_pipe.pipes.key_filter import KeyFilterPipe
-from model_pipe.pipes.key_rename import KeyRenamePipe
-from model_pipe.pipes.lora_merge import LoRAMergePipe
-from model_pipe.pipes.passthrough import PassthroughPipe
-from model_pipe.utils.fsdp import (
+from tftf.io.reader import SafetensorsReader
+from tftf.io.sharded_reader import ShardedSafetensorsReader
+from tftf.io.writer import StreamingWriter
+from tftf.pipeline import Pipeline, ReaderProtocol
+from tftf.pipes.base import TensorMeta, TensorRecord
+from tftf.pipes.dtype_cast import DTypeCastPipe
+from tftf.pipes.fsdp_lora_merge import FSDPShardMergePipe
+from tftf.pipes.key_filter import KeyFilterPipe
+from tftf.pipes.key_rename import KeyRenamePipe
+from tftf.pipes.lora_merge import LoRAMergePipe
+from tftf.pipes.passthrough import PassthroughPipe
+from tftf.utils.fsdp import (
     check_for_flat_params,
     find_shard_files,
     reconstruct_from_shards,
 )
-from model_pipe.utils.lora import merge_lora
+from tftf.utils.lora import merge_lora
 
 
 # ---------------------------------------------------------------------------

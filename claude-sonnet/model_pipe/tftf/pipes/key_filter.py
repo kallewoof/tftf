@@ -47,7 +47,7 @@ import fnmatch
 import logging
 from typing import Iterator
 
-from model_pipe.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
 
 logger = logging.getLogger(__name__)
 

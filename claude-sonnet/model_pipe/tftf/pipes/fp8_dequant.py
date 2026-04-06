@@ -48,8 +48,8 @@ from typing import Iterator, Optional
 
 import torch
 
-from model_pipe.pipes.base import Pipe, TensorMeta, TensorRecord
-from model_pipe.utils.fp8 import (
+from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
+from tftf.utils.fp8 import (
     _BLOCK,
     dequantize_fp8_weight,
     is_fp8_dtype,

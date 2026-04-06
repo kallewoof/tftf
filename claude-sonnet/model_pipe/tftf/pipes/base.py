@@ -1,5 +1,5 @@
 """
-Core abstractions for the model-pipe pipeline.
+Core abstractions for the tftf pipeline.
 
 Every stage in the pipeline is a Pipe.  A Pipe transforms a *lazy stream*
 of TensorRecords, consuming one tensor at a time so the full model is never

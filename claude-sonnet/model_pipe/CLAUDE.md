@@ -18,12 +18,12 @@ pytest tests/test_fp8.py -v
 pytest tests/test_pipeline.py::test_name -v
 
 # CLI entry point
-model-pipe --help
+tftf --help
 ```
 
 ## Architecture
 
-`model-pipe` is a **two-pass streaming pipeline** for non-destructive transformation of HuggingFace `.safetensors` models. The core constraint it solves: safetensors format requires the full header (all tensor metadata and byte offsets) at the beginning of the file, before any tensor data.
+`tftf` is a **two-pass streaming pipeline** for non-destructive transformation of HuggingFace `.safetensors` models. The core constraint it solves: safetensors format requires the full header (all tensor metadata and byte offsets) at the beginning of the file, before any tensor data.
 
 ### Two-phase execution
 
