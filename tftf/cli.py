@@ -14,7 +14,6 @@ model.safetensors.index.json files as model inputs.
 
 All write commands support:
   --dry-run            Validate without writing anything to disk.
-  --sharded            Write output as shard files + index.json.
   --max-shard-size N   Maximum bytes per output shard (default 20 GiB).
 """
 
@@ -32,7 +31,7 @@ import torch
 from tftf.io.null_writer import NullWriter, ValidationReport
 from tftf.io.sharded_reader import ShardedSafetensorsReader
 from tftf.io.sharded_writer import ShardedWriter
-from tftf.io.writer import _DTYPE_ITEMSIZE, StreamingWriter
+from tftf.io.writer import _DTYPE_ITEMSIZE
 from tftf.pipeline import Pipeline
 from tftf.pipes.base import Pipe
 from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
@@ -56,7 +55,7 @@ _DTYPE_CHOICES: dict[str, torch.dtype] = {
 
 _MODEL_PATH_TYPE = click.Path(exists=True, path_type=Path)
 
-_DEFAULT_MAX_SHARD_BYTES = 5 * 1024 ** 3  # 5 GiB
+_DEFAULT_MAX_SHARD_BYTES = 20 * 1024 ** 3  # 20 GiB
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -196,21 +195,19 @@ def _make_writer(
     output_path: Path,
     *,
     dry_run: bool = False,
-    sharded: bool = False,
     max_shard_size: int = _DEFAULT_MAX_SHARD_BYTES,
-) -> Union[StreamingWriter, ShardedWriter, NullWriter]:
+) -> Union[ShardedWriter, NullWriter]:
     """
     Return the appropriate writer for the given flags.
 
-    *output_path* is always treated as a directory.  The directory is created
-    if it does not exist.  Priority: dry_run > sharded > single-file.
+    *output_path* is always treated as a directory and created if absent.
+    Output is always written as sharded safetensors; use *max_shard_size* to
+    control the per-file cap (default 20 GiB).
     """
     if dry_run:
         return NullWriter()
     output_path.mkdir(parents=True, exist_ok=True)
-    if sharded:
-        return ShardedWriter(output_path, max_shard_bytes=max_shard_size)
-    return StreamingWriter(output_path / "model.safetensors")
+    return ShardedWriter(output_path, max_shard_bytes=max_shard_size)
 
 
 def _model_dir(path: Path) -> Path:
@@ -249,7 +246,7 @@ def _copy_model_extras(src: Path, dst: Path) -> None:
 
 
 def _finish_write(
-    writer: Union[StreamingWriter, ShardedWriter, NullWriter],
+    writer: Union[ShardedWriter, NullWriter],
     *,
     verbose: bool = False,
 ) -> None:
@@ -262,19 +259,15 @@ def _finish_write(
 
 
 def _common_write_options(f):
-    """Decorator that attaches --dry-run / --sharded / --max-shard-size to a command."""
+    """Decorator that attaches --dry-run / --max-shard-size to a command."""
     f = click.option(
         "--dry-run", is_flag=True,
         help="Validate the full pipeline without writing any output.",
     )(f)
     f = click.option(
-        "--sharded", is_flag=True,
-        help="Write output as multiple shard files + model.safetensors.index.json.",
-    )(f)
-    f = click.option(
         "--max-shard-size", default=_DEFAULT_MAX_SHARD_BYTES,
         show_default="20 GiB", type=int,
-        help="Maximum bytes per output shard (only used with --sharded).",
+        help="Maximum bytes per output shard.",
     )(f)
     return f
 
@@ -400,7 +393,6 @@ def passthrough(
     include_patterns: tuple[str, ...],
     exclude_patterns: tuple[str, ...],
     dry_run: bool,
-    sharded: bool,
     max_shard_size: int,
     no_progress: bool,
     verbose: bool,
@@ -414,9 +406,6 @@ def passthrough(
     Examples:
         # Copy and cast to bfloat16
         tftf passthrough -i ./llama-70b/ -o ./out/ --dtype bfloat16
-
-        # Write output as shards
-        tftf passthrough -i ./model.safetensors -o ./out/ --sharded
 
         # Validate without writing
         tftf passthrough -i ./model.safetensors -o ./out/ --dry-run
@@ -436,8 +425,7 @@ def passthrough(
     if dtype:
         pipe = pipe | DTypeCastPipe(_DTYPE_CHOICES[dtype])
 
-    writer = _make_writer(output_path, dry_run=dry_run, sharded=sharded,
-                          max_shard_size=max_shard_size)
+    writer = _make_writer(output_path, dry_run=dry_run, max_shard_size=max_shard_size)
     Pipeline(
         reader=_open_reader(input_path),
         pipe=pipe,
@@ -488,7 +476,6 @@ def merge_lora(
     dtype: str | None,
     rename_rules: tuple[tuple[str, str], ...],
     dry_run: bool,
-    sharded: bool,
     max_shard_size: int,
     no_progress: bool,
     verbose: bool,
@@ -520,11 +507,10 @@ def merge_lora(
             -b ./llama-7b/ -a ./adapter_model.safetensors \\
             -o ./merged/ --dry-run
 
-        # Write as shards, with key renaming
+        # Key renaming
         tftf merge-lora \\
             -b ./llama-7b/ -a ./adapter_model.safetensors \\
-            -o ./merged/ --sharded \\
-            --rename '^transformer\\.h\\.' 'model.layers.'
+            -o ./merged/ --rename '^transformer\\.h\\.' 'model.layers.'
     """
     _setup_logging(verbose)
 
@@ -554,8 +540,7 @@ def merge_lora(
     if dtype:
         pipe = pipe | DTypeCastPipe(_DTYPE_CHOICES[dtype])
 
-    writer = _make_writer(output_path, dry_run=dry_run, sharded=sharded,
-                          max_shard_size=max_shard_size)
+    writer = _make_writer(output_path, dry_run=dry_run, max_shard_size=max_shard_size)
     Pipeline(
         reader=_open_reader(base_path, device=device),
         pipe=pipe,
@@ -606,7 +591,6 @@ def merge_dcp_lora(
     dtype: str | None,
     rename_rules: tuple[tuple[str, str], ...],
     dry_run: bool,
-    sharded: bool,
     max_shard_size: int,
     no_progress: bool,
     verbose: bool,
@@ -627,12 +611,6 @@ def merge_dcp_lora(
             -b ./llama-7b/ \\
             -c ./checkpoint-60/pytorch_model_fsdp_0 \\
             -o ./merged/ --dtype bfloat16
-
-        # Write as shards
-        tftf merge-dcp-lora \\
-            -b ./llama-7b/ \\
-            -c ./checkpoint-60/pytorch_model_fsdp_0 \\
-            -o ./merged/ --sharded --dtype bfloat16
 
         # Dry-run validation first
         tftf merge-dcp-lora \\
@@ -657,8 +635,7 @@ def merge_dcp_lora(
     if dtype:
         pipe = pipe | DTypeCastPipe(_DTYPE_CHOICES[dtype])
 
-    writer = _make_writer(output_path, dry_run=dry_run, sharded=sharded,
-                          max_shard_size=max_shard_size)
+    writer = _make_writer(output_path, dry_run=dry_run, max_shard_size=max_shard_size)
     Pipeline(
         reader=_open_reader(base_path, device=device),
         pipe=pipe,
@@ -787,7 +764,6 @@ def dequant_fp8(
     block_size: int,
     device: str,
     dry_run: bool,
-    sharded: bool,
     max_shard_size: int,
     no_progress: bool,
     verbose: bool,
@@ -807,8 +783,7 @@ def dequant_fp8(
         # Dequantise DeepSeek-V3 to bfloat16
         tftf dequant-fp8 \\
             -i ./DeepSeek-V3/ \\
-            -o ./DeepSeek-V3-bf16/ \\
-            --sharded
+            -o ./DeepSeek-V3-bf16/
 
         # Dequantise then fuse a LoRA adapter, dry-run first
         tftf dequant-fp8 \\
@@ -816,7 +791,7 @@ def dequant_fp8(
             -o ./merged/ \\
             --dtype bfloat16 \\
             --merge-lora ./my-lora/adapter_model.safetensors \\
-            --sharded --dry-run
+            --dry-run
 
         # Dequantise to float16
         tftf dequant-fp8 \\
@@ -846,8 +821,7 @@ def dequant_fp8(
             device=device,
         )
 
-    writer = _make_writer(output_path, dry_run=dry_run, sharded=sharded,
-                          max_shard_size=max_shard_size)
+    writer = _make_writer(output_path, dry_run=dry_run, max_shard_size=max_shard_size)
     Pipeline(
         reader=_open_reader(input_path, device=device),
         pipe=pipe,

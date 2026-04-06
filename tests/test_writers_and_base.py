@@ -16,7 +16,6 @@ from tftf.io.null_writer import NullWriter
 from tftf.io.reader import SafetensorsReader
 from tftf.io.sharded_reader import ShardedSafetensorsReader
 from tftf.io.sharded_writer import ShardedWriter
-from tftf.io.writer import StreamingWriter
 from tftf.pipeline import Pipeline
 from tftf.pipes._lora_base import LoRAMergeBase
 from tftf.pipes.base import Pipe, TensorMeta, TensorRecord
@@ -558,17 +557,12 @@ class TestMakeWriter:
         w = _make_writer(tmp_path / "out.safetensors", dry_run=True)
         assert isinstance(w, NullWriter)
 
-    def test_returns_sharded_writer_on_sharded(self, tmp_path):
+    def test_returns_sharded_writer_by_default(self, tmp_path):
         from tftf.cli import _make_writer
-        w = _make_writer(tmp_path / "out", sharded=True)
+        w = _make_writer(tmp_path / "out")
         assert isinstance(w, ShardedWriter)
 
-    def test_returns_streaming_writer_by_default(self, tmp_path):
+    def test_dry_run_takes_priority(self, tmp_path):
         from tftf.cli import _make_writer
-        w = _make_writer(tmp_path / "out.safetensors")
-        assert isinstance(w, StreamingWriter)
-
-    def test_dry_run_takes_priority_over_sharded(self, tmp_path):
-        from tftf.cli import _make_writer
-        w = _make_writer(tmp_path / "out", dry_run=True, sharded=True)
+        w = _make_writer(tmp_path / "out", dry_run=True)
         assert isinstance(w, NullWriter)

@@ -632,6 +632,14 @@ class TestResolveAdapter:
             self.resolve(tmp_path)
 
 
+def _load_output(path: Path) -> dict[str, torch.Tensor]:
+    """Load all tensors from a sharded CLI output directory."""
+    result = {}
+    for sf in sorted(path.glob("*.safetensors")):
+        result.update(load_file(str(sf)))
+    return result
+
+
 class TestMergeLoraCLIAutoDetect:
     """Integration tests: merge-lora command routes to the correct pipe automatically."""
 
@@ -658,7 +666,7 @@ class TestMergeLoraCLIAutoDetect:
 
         out = tmp_path / "merged"
         self._run_merge(base_path, training_dir, out)
-        result = load_file(str(out / "model.safetensors"))
+        result = _load_output(out)
         assert set(result.keys()) == set(base_tensors.keys())
 
     def test_training_dir_regular_lora_merges_correctly(self, tmp_path):
@@ -671,7 +679,7 @@ class TestMergeLoraCLIAutoDetect:
 
         out = tmp_path / "merged"
         self._run_merge(base_path, training_dir, out)
-        result = load_file(str(out / "model.safetensors"))
+        result = _load_output(out)
         assert set(result.keys()) == set(base_tensors.keys())
         # lora_B is all-ones so q_proj must differ from base
         assert not torch.allclose(
@@ -699,4 +707,6 @@ class TestMergeLoraCLIAutoDetect:
         assert (out / "config.json").exists()
         assert (out / "tokenizer.json").exists()
         assert not (out / "model.gguf").exists()
-        assert not (out / "model.safetensors.index.json").exists()
+        # model.safetensors.index.json is produced by the sharded writer — not a
+        # stale copy from the base model (which had none in this test case)
+        assert (out / "model.safetensors.index.json").exists()

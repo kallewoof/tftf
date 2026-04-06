@@ -645,6 +645,6 @@ class TestCLI:
     def test_dequant_fp8_options(self):
         from tftf.cli import cli
         params = {p.name for p in cli.commands["dequant-fp8"].params}
-        for expected in ("dtype", "lora_adapter", "dry_run", "sharded",
+        for expected in ("dtype", "lora_adapter", "dry_run",
                          "max_shard_size", "block_size", "device"):
             assert expected in params, f"Missing option: {expected}"
