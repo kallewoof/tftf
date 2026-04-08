@@ -39,6 +39,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import torch
+
 from tftf.pipes._lora_base import LoRAMergeBase
 from tftf.utils.dcp import load_dcp_state_dict
 from tftf.utils.lora import LoRAConfig
@@ -109,6 +111,15 @@ class DCPLoRAMergePipe(LoRAMergeBase):
         weights = load_dcp_state_dict(self.checkpoint_dir)
 
         for key, tensor in weights.items():
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(
+                    f"DCP checkpoint key {key!r} maps to a "
+                    f"{type(tensor).__name__}, not a tensor. "
+                    "The checkpoint directory may be an optimizer state dict "
+                    "rather than a model checkpoint. "
+                    "Pass the model DCP directory directly "
+                    "(e.g. pytorch_model_fsdp_0/)."
+                )
             self._lora_weights[key] = tensor.to(self.device)
 
         self._adapter_key_set = set(self._lora_weights)

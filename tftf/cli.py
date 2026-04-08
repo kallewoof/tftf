@@ -124,7 +124,10 @@ def _resolve_adapter(path: Path) -> tuple[Path, str, Path | None]:
     # DCP subdir wins if present.
     dcp_subdirs = [d for d in latest.iterdir() if d.is_dir() and (d / ".metadata").exists()]
     if dcp_subdirs:
-        dcp_dir = dcp_subdirs[0]
+        # Prefer model DCP dirs over optimizer ones (optimizer dirs contain no LoRA
+        # weights — picking them produces a confusing crash downstream).
+        model_dirs = [d for d in dcp_subdirs if "optimizer" not in d.name.lower()]
+        dcp_dir = sorted(model_dirs or dcp_subdirs)[0]
         if len(dcp_subdirs) > 1:
             click.echo(f"Multiple DCP subdirectories found; using {dcp_dir.name}", err=True)
         return dcp_dir, "dcp", config_hint
@@ -179,7 +182,10 @@ def _resolve_dcp_checkpoint(path: Path) -> Path:
             param_hint="-c / --checkpoint-dir",
         )
 
-    dcp_dir = dcp_subdirs[0]
+    # Prefer model DCP dirs over optimizer ones (optimizer dirs contain no LoRA
+    # weights — picking them produces a confusing crash downstream).
+    model_dirs = [d for d in dcp_subdirs if "optimizer" not in d.name.lower()]
+    dcp_dir = sorted(model_dirs or dcp_subdirs)[0]
     if len(dcp_subdirs) > 1:
         click.echo(
             f"Multiple DCP subdirectories found; using {dcp_dir.name}",

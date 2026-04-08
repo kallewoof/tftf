@@ -273,6 +273,33 @@ class TestDCPLoRAMergePipe:
         assert "DCPLoRAMergePipe" in r
         assert "pytorch_model_fsdp_0" in r
 
+    def test_setup_raises_type_error_when_dcp_returns_dict_values(self, tmp_path, monkeypatch):
+        """setup() raises TypeError with a helpful message when load_dcp_state_dict
+        returns dict values instead of tensors (e.g. an optimizer DCP was loaded).
+
+        This guards against the 'dict object has no attribute to' AttributeError
+        that occurs when the resolver accidentally picks optimizer_0 over the
+        model DCP directory.
+        """
+        import tftf.pipes.dcp_lora_merge as mod
+        from tftf.pipes.dcp_lora_merge import DCPLoRAMergePipe
+
+        dcp_dir = _make_dcp_lora(tmp_path)
+
+        # Simulate optimizer DCP structure after two rounds of single-key unwrapping:
+        # {"optimizer": {"state": {param: {exp_avg, step}}}} → {param: {exp_avg, step}}
+        bad_weights = {
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": {
+                "exp_avg": torch.zeros(4, 32),
+                "step": torch.tensor(60),
+            }
+        }
+        monkeypatch.setattr(mod, "load_dcp_state_dict", lambda _: bad_weights)
+
+        pipe = DCPLoRAMergePipe(checkpoint_dir=dcp_dir)
+        with pytest.raises(TypeError, match="optimizer state dict"):
+            pipe.setup()
+
 
 # ---------------------------------------------------------------------------
 # DoRA via DCP
@@ -543,6 +570,32 @@ class TestResolveDcpCheckpoint:
         with pytest.raises(click.BadParameter, match="No DCP directory"):
             self.resolve(tmp_path)
 
+    def test_prefers_model_dcp_over_optimizer_dcp(self, tmp_path):
+        """When optimizer_0 and pytorch_model_fsdp_0 both exist, picks the model dir.
+
+        optimizer_0 sorts before pytorch_model_fsdp_0 alphabetically, so without
+        the optimizer-filtering logic the wrong directory would be returned.
+        """
+        import torch.distributed.checkpoint as dist_cp
+
+        (tmp_path / "adapter_config.json").write_text(json.dumps({"r": 4, "lora_alpha": 8.0}))
+        ckpt = tmp_path / "checkpoint-100"
+
+        # optimizer DCP (alphabetically first — the previously-buggy choice)
+        opt_dcp = ckpt / "optimizer_0"
+        opt_dcp.mkdir(parents=True)
+        dist_cp.save({"x": torch.zeros(1)}, storage_writer=dist_cp.FileSystemWriter(opt_dcp), no_dist=True)
+
+        # model DCP (alphabetically second — the correct choice)
+        model_dcp = ckpt / "pytorch_model_fsdp_0"
+        model_dcp.mkdir(parents=True)
+        dist_cp.save({"x": torch.zeros(1)}, storage_writer=dist_cp.FileSystemWriter(model_dcp), no_dist=True)
+
+        result = self.resolve(tmp_path)
+        assert result.name == "pytorch_model_fsdp_0", (
+            f"Expected model DCP directory, got {result.name!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # merge-lora auto-detection (_resolve_adapter + merge-lora command)
@@ -630,6 +683,33 @@ class TestResolveAdapter:
         (tmp_path / "checkpoint-1").mkdir()
         with pytest.raises(click.BadParameter, match="does not appear to be a training directory"):
             self.resolve(tmp_path)
+
+    def test_prefers_model_dcp_over_optimizer_dcp(self, tmp_path):
+        """When optimizer_0 and pytorch_model_fsdp_0 both exist, picks the model dir.
+
+        optimizer_0 sorts before pytorch_model_fsdp_0 alphabetically, so without
+        the optimizer-filtering logic the wrong directory would be returned.
+        """
+        import torch.distributed.checkpoint as dist_cp
+
+        (tmp_path / "adapter_config.json").write_text(json.dumps({"r": 4, "lora_alpha": 8.0}))
+        ckpt = tmp_path / "checkpoint-100"
+
+        # optimizer DCP (alphabetically first — the previously-buggy choice)
+        opt_dcp = ckpt / "optimizer_0"
+        opt_dcp.mkdir(parents=True)
+        dist_cp.save({"x": torch.zeros(1)}, storage_writer=dist_cp.FileSystemWriter(opt_dcp), no_dist=True)
+
+        # model DCP (alphabetically second — the correct choice)
+        model_dcp = ckpt / "pytorch_model_fsdp_0"
+        model_dcp.mkdir(parents=True)
+        dist_cp.save({"x": torch.zeros(1)}, storage_writer=dist_cp.FileSystemWriter(model_dcp), no_dist=True)
+
+        path, kind, _ = self.resolve(tmp_path)
+        assert kind == "dcp"
+        assert path.name == "pytorch_model_fsdp_0", (
+            f"Expected model DCP directory, got {path.name!r}"
+        )
 
 
 def _load_output(path: Path) -> dict[str, torch.Tensor]:
