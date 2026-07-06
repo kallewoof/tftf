@@ -493,13 +493,19 @@ def _make_training_dir(tmp: Path, checkpoint_steps: list[int], dcp_name: str = "
 
     (tmp / "adapter_config.json").write_text(json.dumps({"r": 4, "lora_alpha": 8.0}))
     (tmp / "config.json").write_text("{}")
+    # Real (if tiny) LoRA tensors so an actual merge happens — a no-op adapter
+    # is now rejected by LoRAMergeBase's guardrails.
+    lora_tensors = {
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.randn(4, 32) * 0.01,
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight": torch.zeros(64, 4),
+    }
     for step in checkpoint_steps:
         ckpt = tmp / f"checkpoint-{step}"
         dcp = ckpt / dcp_name
         dcp.mkdir(parents=True)
         # Write a minimal DCP checkpoint so .metadata exists
         dist_cp.save(
-            state_dict={"x": torch.zeros(1)},
+            state_dict={"model": lora_tensors},
             storage_writer=dist_cp.FileSystemWriter(dcp),
             no_dist=True,
         )

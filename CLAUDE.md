@@ -47,7 +47,7 @@ tftf --help
 - `DTypeCastPipe` — dtype conversion (e.g. fp32→bf16)
 - `KeyFilterPipe` — glob-based include/exclude of tensor keys
 - `KeyRenamePipe` — regex substitution for cross-framework key renaming
-- `LoRAMergePipe` — fuse a single PEFT adapter into a base model
+- `LoRAMergePipe` — fuse a single PEFT adapter into a base model (handles regex `target_modules` and `target_parameters` MoE grouped-expert LoRA; raises if a merge matches nothing)
 - `FSDPShardMergePipe` — fuse per-rank FSDP-sharded LoRA adapters
 - `FP8DequantPipe` — dequantize fine-grained FP8 weights (DeepSeek-V3/R1 style)
 - `CompoundPipe` — chain pipes using the `|` operator
@@ -89,4 +89,4 @@ Key rule: pipes must be **lazy** — don't buffer streams, free tensors immediat
 
 ### Tests
 
-Tests use synthetic in-memory tensors — no model downloads needed. All 91 tests run quickly. Test files map roughly to modules: `test_fp8.py`, `test_pipeline.py`, `test_writers_and_base.py`, `test_new_features.py`.
+Tests use synthetic in-memory tensors — no model downloads needed. All tests run quickly. Test files map roughly to modules: `test_fp8.py`, `test_pipeline.py`, `test_writers_and_base.py`, `test_new_features.py`, `test_moe_lora_merge.py` (grouped-expert / `target_parameters` LoRA + merge guardrails).

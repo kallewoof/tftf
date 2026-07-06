@@ -16,6 +16,18 @@ PEFT LoRA adapters use a `base_model.model.` prefix and `.lora_A.weight` /
 `.lora_B.weight` suffixes.  See utils/lora.py for the full mapping logic,
 which handles adapter names, embedding layers, and several PEFT versions.
 
+``target_modules`` may be a list of module names OR a single regex string
+(PEFT treats a bare string as a regex).  ``target_parameters`` (PEFT's
+parameter-level targeting) is supported for MoE grouped-expert weights —
+stacked-expert LoRA on 3-D parameters such as ``experts.gate_up_proj`` — via
+:func:`~tftf.utils.lora.merge_grouped_lora`.
+
+Guardrails
+----------
+If the merge matches zero base tensors (the output would be identical to the
+base model), or if adapter weights that should have merged go unused, the pipe
+raises ``RuntimeError`` rather than silently emitting a copy of the base model.
+
 FSDP sharded LoRA
 -----------------
 For adapters trained with FSDP (DCP checkpoint format), use DCPLoRAMergePipe.

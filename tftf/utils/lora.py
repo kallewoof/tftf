@@ -55,9 +55,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -76,7 +77,15 @@ class LoRAConfig:
 
     r: int = 8
     lora_alpha: float = 8.0
-    target_modules: list[str] = field(default_factory=list)
+    # PEFT allows ``target_modules`` to be either a list of module names
+    # (matched by exact/suffix) OR a single string that is treated as a
+    # regular expression matched against the full module name.  We preserve
+    # whichever form the adapter used — see ``matches_module``.
+    target_modules: Union[list[str], str] = field(default_factory=list)
+    # PEFT ``target_parameters`` — LoRA applied directly to an nn.Parameter
+    # rather than a module (used for MoE grouped-expert weights, e.g.
+    # ``experts.gate_up_proj``).  These are stacked-expert LoRA tensors.
+    target_parameters: list[str] = field(default_factory=list)
     adapter_name: str = "default"
 
     @property
@@ -84,14 +93,61 @@ class LoRAConfig:
         """The standard alpha/r scaling factor."""
         return self.lora_alpha / self.r
 
+    def matches_module(self, module_name: str) -> bool:
+        """
+        PEFT ``target_modules`` matching semantics.
+
+        - Empty ``target_modules`` → matches everything (no pre-filter; the
+          authoritative check is whether an adapter tensor actually exists).
+        - String ``target_modules`` → treated as a regex, matched with
+          ``re.fullmatch`` against the full module name.
+        - List ``target_modules`` → matches if the module name equals, or ends
+          with ``.<entry>`` for, any listed entry.
+        """
+        tm = self.target_modules
+        if not tm:
+            return True
+        if isinstance(tm, str):
+            return re.fullmatch(tm, module_name) is not None
+        return any(module_name == m or module_name.endswith(f".{m}") for m in tm)
+
+    def matched_parameter(self, key: str) -> Optional[str]:
+        """
+        Return the ``target_parameters`` entry that *key* corresponds to, or
+        ``None``.  A base key matches an entry if it equals it or ends with
+        ``.<entry>`` (entries are relative parameter paths like
+        ``experts.gate_up_proj``).
+        """
+        for tp in self.target_parameters:
+            if key == tp or key.endswith(f".{tp}"):
+                return tp
+        return None
+
     @classmethod
     def from_file(cls, path: Path) -> LoRAConfig:
         with open(path) as f:
             cfg = json.load(f)
+        # target_modules may legitimately be a str (regex) or a list — keep the
+        # raw form.  (A previous version called ``list(...)`` on it, which
+        # silently exploded a regex string into individual characters and made
+        # the merge a no-op.)
+        target_modules = cfg.get("target_modules") or []
+        if not isinstance(target_modules, (str, list)):
+            raise ValueError(
+                f"adapter_config.json: 'target_modules' must be a string or list, "
+                f"got {type(target_modules).__name__}"
+            )
+        target_parameters = cfg.get("target_parameters") or []
+        if not isinstance(target_parameters, list):
+            raise ValueError(
+                f"adapter_config.json: 'target_parameters' must be a list, "
+                f"got {type(target_parameters).__name__}"
+            )
         return cls(
             r=int(cfg.get("r", 8)),
             lora_alpha=float(cfg.get("lora_alpha", 8.0)),
-            target_modules=list(cfg.get("target_modules", [])),
+            target_modules=target_modules,
+            target_parameters=list(target_parameters),
         )
 
     @classmethod
@@ -170,6 +226,54 @@ def find_lora_keys(
                 return a_key, b_key, True
 
     return None
+
+
+def find_grouped_lora_pairs(
+    module_path: str,
+    adapter_key_set: set[str],
+    adapter_name: str = "default",
+) -> list[tuple[str, str]]:
+    """
+    Find every ``(a_key, b_key)`` LoRA pair attached to *module_path* via PEFT's
+    ``target_parameters`` mechanism (used for MoE grouped-expert weights).
+
+    Unlike ``find_lora_keys`` — which reconstructs the adapter key from a base
+    *weight* key — ``target_parameters`` LoRA hangs off the *module* that owns
+    the parameter, not a ``.weight`` sub-key.  When several parameters of one
+    module are targeted, PEFT nests the wrappers, so the adapter keys look like::
+
+        base_model.model.<module_path>.lora_A.weight              (param 1)
+        base_model.model.<module_path>.base_layer.lora_A.weight   (param 2)
+
+    Both reduce to *module_path* once the ``base_model.model.`` prefix and any
+    trailing ``.base_layer`` wrappers are stripped.  Returns all such pairs;
+    the caller disambiguates which pair fuses into which parameter by shape.
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for prefix in _PREFIXES:
+        for a_suf, b_suf in _linear_variants(adapter_name):
+            for a_key in adapter_key_set:
+                if not a_key.endswith(a_suf):
+                    continue
+                if prefix and not a_key.startswith(prefix):
+                    continue
+
+                core = a_key[len(prefix):-len(a_suf)] if prefix else a_key[:-len(a_suf)]
+                reduced = core
+                while reduced.endswith(".base_layer"):
+                    reduced = reduced[: -len(".base_layer")]
+                if reduced != module_path:
+                    continue
+
+                b_key = f"{prefix}{core}{b_suf}"
+                pair = (a_key, b_key)
+                if b_key in adapter_key_set and pair not in seen:
+                    seen.add(pair)
+                    pairs.append(pair)
+
+    return pairs
 
 
 def find_magnitude_key(
@@ -367,3 +471,86 @@ def merge_dora(
     result = mag_norm_scale.view(view_shape) * w_merged
 
     return result.to(orig_dtype)
+
+
+def merge_grouped_lora(
+    weight: torch.Tensor,
+    lora_a: torch.Tensor,
+    lora_b: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """
+    Fuse PEFT ``target_parameters`` (grouped-expert) LoRA into a 3-D stacked
+    expert weight and return the merged tensor.
+
+    A stacked-expert parameter has shape ``(num_experts, d1, d2)``.  PEFT stores
+    a single LoRA per parameter with the per-expert ranks concatenated:
+
+        lora_A : (num_experts * r, in_features)      # experts stacked row-wise
+        lora_B : (out_features, num_experts * r)     # experts interleaved col-wise
+
+    The reshape convention is taken **verbatim** from PEFT's
+    ``ParamWrapper.get_delta_weight`` (peft/tuners/lora/layer.py) so that the
+    fused result matches what PEFT would compute at inference:
+
+        A → (num_experts, r, in_features)            # expert index is *outer*
+        B → (out_features, r, num_experts)           # expert index is *inner*
+        delta[e] = (B[:, :, e] @ A[e]) * scale       # standard LoRA, per expert
+
+    The einsum output orientation is chosen to match *weight*'s layout:
+    ``(E, out, in)`` (the common MoE ``is_transposed`` case) or ``(E, in, out)``.
+
+    All computation is done in float32; the result is cast back to *weight*'s
+    original dtype.
+
+    Raises:
+        ValueError: if *weight* is not 3-D, if the A/B ranks are inconsistent,
+            or if the A/B shapes cannot be reconciled with *weight*'s shape.
+    """
+    if weight.ndim != 3:
+        raise ValueError(
+            f"merge_grouped_lora: expected a 3-D stacked-expert weight, got "
+            f"ndim={weight.ndim}, shape={tuple(weight.shape)}."
+        )
+
+    orig_dtype = weight.dtype
+    w = weight.float()
+    a = lora_a.float()  # (E*r, in)
+    b = lora_b.float()  # (out, E*r)
+
+    num_experts = w.shape[0]
+    er = a.shape[0]
+
+    if b.shape[1] != er:
+        raise ValueError(
+            f"merge_grouped_lora: lora_A rows ({er}) and lora_B cols "
+            f"({b.shape[1]}) disagree on num_experts*rank; "
+            f"A={tuple(a.shape)}, B={tuple(b.shape)}."
+        )
+    if er % num_experts != 0:
+        raise ValueError(
+            f"merge_grouped_lora: stacked rank {er} is not divisible by "
+            f"num_experts {num_experts} (A={tuple(a.shape)}, "
+            f"weight={tuple(weight.shape)})."
+        )
+
+    r = er // num_experts
+    in_features = a.shape[1]
+    out_features = b.shape[0]
+
+    # Replicate PEFT's exact reshapes (expert-outer for A, expert-inner for B).
+    a3 = a.reshape(num_experts, r, in_features)   # "e r i"
+    b3 = b.reshape(out_features, r, num_experts)  # "o r e"
+
+    if tuple(w.shape) == (num_experts, out_features, in_features):
+        delta = torch.einsum("o r e, e r i -> e o i", b3, a3)
+    elif tuple(w.shape) == (num_experts, in_features, out_features):
+        delta = torch.einsum("o r e, e r i -> e i o", b3, a3)
+    else:
+        raise ValueError(
+            f"merge_grouped_lora: cannot reconcile weight shape "
+            f"{tuple(weight.shape)} with LoRA (experts={num_experts}, "
+            f"out={out_features}, in={in_features})."
+        )
+
+    return (w + scale * delta).to(orig_dtype)
