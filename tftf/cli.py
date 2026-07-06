@@ -1126,16 +1126,17 @@ def run_pipeline(
 
     \b
     Examples:
+    \b
         # Dequantise FP8 then fuse a LoRA adapter
         tftf run -i ./DeepSeek-V3/ -o ./merged/ \\
             --dequant-fp8 --dtype bf16 \\
             --merge-lora --adapter /mnt/trainerdir
-
+    \b
         # Auto-detect adapter format from a training output directory
         tftf run -i ./llama-7b/ -o ./merged/ \\
             --merge-lora --adapter ./training-output/ \\
             --dtype-cast --dtype bf16
-
+    \b
         # Rename keys, filter, cast — no base model merge
         tftf run -i ./model/ -o ./out/ \\
             --key-rename --rule '^transformer\\.h\\.' 'model.layers.' \\
